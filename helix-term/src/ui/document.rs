@@ -11,26 +11,10 @@ use helix_view::editor::{WhitespaceConfig, WhitespaceRenderValue};
 use helix_view::graphics::Rect;
 use helix_view::theme::Style;
 use helix_view::view::ViewPosition;
-use helix_view::Document;
-use helix_view::Theme;
+use helix_view::{Document, Theme};
 use tui::buffer::Buffer as Surface;
 
-pub trait LineDecoration {
-    fn render_background(&mut self, _renderer: &mut TextRenderer, _pos: LinePos) {}
-    fn render_foreground(
-        &mut self,
-        _renderer: &mut TextRenderer,
-        _pos: LinePos,
-        _end_char_idx: usize,
-    ) {
-    }
-}
-
-impl<F: FnMut(&mut TextRenderer, LinePos)> LineDecoration for F {
-    fn render_background(&mut self, renderer: &mut TextRenderer, pos: LinePos) {
-        self(renderer, pos)
-    }
-}
+use crate::ui::text_decorations::DecorationManager;
 
 /// A wrapper around a HighlightIterator
 /// that merges the layered highlights to create the final text style
@@ -78,14 +62,7 @@ pub struct LinePos {
     pub doc_line: usize,
     /// Vertical offset from the top of the inner view area
     pub visual_line: u16,
-    /// The first char index of this visual line.
-    /// Note that if the visual line is entirely filled by
-    /// a very long inline virtual text then this index will point
-    /// at the next (non-virtual) char after this visual line
-    pub start_char_idx: usize,
 }
-
-pub type TranslatedPosition<'a> = (usize, Box<dyn FnMut(&mut TextRenderer, Position) + 'a>);
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_document(
@@ -97,8 +74,7 @@ pub fn render_document(
     syntax_highlight_iter: impl Iterator<Item = HighlightEvent>,
     overlay_highlight_iter: impl Iterator<Item = HighlightEvent>,
     theme: &Theme,
-    line_decoration: &mut [Box<dyn LineDecoration + '_>],
-    translated_positions: &mut [TranslatedPosition],
+    decorations: DecorationManager,
 ) {
     let mut renderer = TextRenderer::new(surface, doc, theme, offset.horizontal_offset, viewport);
     render_text(
@@ -110,43 +86,8 @@ pub fn render_document(
         syntax_highlight_iter,
         overlay_highlight_iter,
         theme,
-        line_decoration,
-        translated_positions,
+        decorations,
     )
-}
-
-fn translate_positions(
-    char_pos: usize,
-    first_visible_char_idx: usize,
-    translated_positions: &mut [TranslatedPosition],
-    text_fmt: &TextFormat,
-    renderer: &mut TextRenderer,
-    pos: Position,
-) {
-    // check if any positions translated on the fly (like cursor) has been reached
-    for (char_idx, callback) in &mut *translated_positions {
-        if *char_idx < char_pos && *char_idx >= first_visible_char_idx {
-            // by replacing the char_index with usize::MAX large number we ensure
-            // that the same position is only translated once
-            // text will never reach usize::MAX as rust memory allocations are limited
-            // to isize::MAX
-            *char_idx = usize::MAX;
-
-            if text_fmt.soft_wrap {
-                callback(renderer, pos)
-            } else if pos.col >= renderer.col_offset
-                && pos.col - renderer.col_offset < renderer.viewport.width as usize
-            {
-                callback(
-                    renderer,
-                    Position {
-                        row: pos.row,
-                        col: pos.col - renderer.col_offset,
-                    },
-                )
-            }
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -159,8 +100,7 @@ pub fn render_text<'t>(
     syntax_highlight_iter: impl Iterator<Item = HighlightEvent>,
     overlay_highlight_iter: impl Iterator<Item = HighlightEvent>,
     theme: &Theme,
-    line_decorations: &mut [Box<dyn LineDecoration + '_>],
-    translated_positions: &mut [TranslatedPosition],
+    mut decorations: DecorationManager,
 ) {
     let mut row_off = visual_offset_from_block(
         text,
@@ -192,35 +132,16 @@ pub fn render_text<'t>(
         first_visual_line: false,
         doc_line: usize::MAX,
         visual_line: u16::MAX,
-        start_char_idx: usize::MAX,
     };
     let mut is_in_indent_area = true;
     let mut last_line_indent_level = 0;
     let mut syntax_style_span = syntax_styles
         .next()
         .unwrap_or_else(|| (Style::default(), usize::MAX));
-    let mut first_visible_char_idx = formatter.next_char_pos();
+    let mut reached_view_top = false;
 
     loop {
-        // formattter.line_pos returns to line index of the next grapheme
-        // so it must be called before formatter.next
-        let Some(mut grapheme) = formatter.next() else {
-            let mut last_pos = formatter.next_visual_pos();
-            if last_pos.row >= row_off {
-                last_pos.col -= 1;
-                last_pos.row -= row_off;
-                // check if any positions translated on the fly (like cursor) are at the EOF
-                translate_positions(
-                    text.len_chars() + 1,
-                    first_visible_char_idx,
-                    translated_positions,
-                    text_fmt,
-                    renderer,
-                    last_pos,
-                );
-            }
-            break;
-        };
+        let Some(mut grapheme) = formatter.next() else { break };
 
         // skip any graphemes on visual lines before the block start
         if grapheme.visual_pos.row < row_off {
@@ -231,10 +152,13 @@ pub fn render_text<'t>(
                     break;
                 }
             }
-            first_visible_char_idx = formatter.next_char_pos();
             continue;
         }
         grapheme.visual_pos.row -= row_off;
+        if !reached_view_top {
+            decorations.prepare_for_rendering(grapheme.char_idx);
+            reached_view_top = true;
+        }
 
         // if the end of the viewport is reached stop rendering
         if grapheme.visual_pos.row as u16 >= renderer.viewport.height {
@@ -243,23 +167,22 @@ pub fn render_text<'t>(
 
         // apply decorations before rendering a new line
         if grapheme.visual_pos.row as u16 != last_line_pos.visual_line {
-            if grapheme.visual_pos.row > 0 {
+            // we initiate doc_line with usize::MAX because no file
+            // can reach that size (memory allocations are limited to isize::MAX)
+            // initially there is no "previous" line (so doc_line is set to usize::MAX)
+            // in that case we don't need to draw indent guides/virtual text
+            if last_line_pos.doc_line != usize::MAX {
                 // draw indent guides for the last line
                 renderer.draw_indent_guides(last_line_indent_level, last_line_pos.visual_line);
                 is_in_indent_area = true;
-                for line_decoration in &mut *line_decorations {
-                    line_decoration.render_foreground(renderer, last_line_pos, grapheme.char_idx);
-                }
+                decorations.render_virtual_lines(renderer, last_line_pos)
             }
             last_line_pos = LinePos {
                 first_visual_line: grapheme.line_idx != last_line_pos.doc_line,
                 doc_line: grapheme.line_idx,
                 visual_line: grapheme.visual_pos.row as u16,
-                start_char_idx: grapheme.char_idx,
             };
-            for line_decoration in &mut *line_decorations {
-                line_decoration.render_background(renderer, last_line_pos);
-            }
+            decorations.decorate_line(renderer, last_line_pos);
         }
 
         // acquire the correct grapheme style
@@ -267,26 +190,17 @@ pub fn render_text<'t>(
             style_span = styles.next().unwrap_or((Style::default(), usize::MAX));
         }
 
-        // check if any positions translated on the fly (like cursor) has been reached
-        translate_positions(
-            formatter.next_char_pos(),
-            first_visible_char_idx,
-            translated_positions,
-            text_fmt,
-            renderer,
-            grapheme.visual_pos,
-        );
-
-        let (syntax_style, overlay_style) =
-            if let GraphemeSource::VirtualText { highlight } = grapheme.source {
-                let mut style = renderer.text_style;
-                if let Some(highlight) = highlight {
-                    style = style.patch(theme.highlight(highlight.0))
-                }
-                (style, Style::default())
+        let grapheme_style = if let GraphemeSource::VirtualText { highlight } = grapheme.source {
+            let style = renderer.text_style;
+            if let Some(highlight) = highlight {
+                style.patch(theme.highlight(highlight.0))
             } else {
-                (syntax_style_span.0, overlay_style_span.0)
-            };
+                style
+            }
+        } else {
+            style_span.0
+        };
+        decorations.decorate_grapheme(renderer, &grapheme);
 
         let is_virtual = grapheme.is_virtual();
         renderer.draw_grapheme(
@@ -300,9 +214,7 @@ pub fn render_text<'t>(
     }
 
     renderer.draw_indent_guides(last_line_indent_level, last_line_pos.visual_line);
-    for line_decoration in &mut *line_decorations {
-        line_decoration.render_foreground(renderer, last_line_pos, formatter.next_char_pos());
-    }
+    decorations.render_virtual_lines(renderer, last_line_pos)
 }
 
 #[derive(Debug)]
@@ -438,8 +350,7 @@ impl<'a> TextRenderer<'a> {
             Grapheme::Newline => &self.newline,
         };
 
-        let in_bounds = self.col_offset <= position.col
-            && position.col < self.viewport.width as usize + self.col_offset;
+        let in_bounds = self.column_in_bounds(position.col);
 
         if in_bounds {
             self.surface.set_string(
@@ -463,6 +374,10 @@ impl<'a> TextRenderer<'a> {
             *last_indent_level = position.col;
             *is_in_indent_area = false;
         }
+    }
+
+    pub fn column_in_bounds(&self, colum: usize) -> bool {
+        self.col_offset <= colum && colum < self.viewport.width as usize + self.col_offset
     }
 
     /// Overlay indentation guides ontop of a rendered line
