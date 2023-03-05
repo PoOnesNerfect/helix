@@ -1934,12 +1934,6 @@ impl Document {
         }
     }
 
-    /// Get the text annotations that apply to the whole document, those that do not apply to any
-    /// specific view.
-    pub fn text_annotations(&self, _theme: Option<&Theme>) -> TextAnnotations {
-        TextAnnotations::default()
-    }
-
     /// Set the inlay hints for this document and `view_id`.
     pub fn set_inlay_hints(&mut self, view_id: ViewId, inlay_hints: DocumentInlayHints) {
         self.inlay_hints.insert(view_id, inlay_hints);
