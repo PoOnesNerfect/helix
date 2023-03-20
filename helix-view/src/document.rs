@@ -97,7 +97,6 @@ impl Serialize for Mode {
         serializer.collect_str(self)
     }
 }
-
 /// A snapshot of the text of a document that we want to write out to disk
 #[derive(Debug, Clone)]
 pub struct DocumentSavedEvent {

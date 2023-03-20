@@ -6,7 +6,7 @@ use crate::{
     keymap::{KeymapResult, Keymaps},
     ui::{
         document::{render_document, LinePos, TextRenderer},
-        text_decorations::{self, Decoration, DecorationManager},
+        text_decorations::{self, Decoration, DecorationManager, InlineDiagnostics},
         Completion, ProgressSpinners,
     },
 };
@@ -183,16 +183,25 @@ impl EditorView {
             );
         }
 
+        let primary_cursor = doc
+            .selection(view.id)
+            .primary()
+            .cursor(doc.text().slice(..));
+
         if is_focused {
             decorations.add_decoration(text_decorations::Cursor {
                 cache: &editor.cursor_cache,
-                primary_cursor: doc
-                    .selection(view.id)
-                    .primary()
-                    .cursor(doc.text().slice(..)),
+                primary_cursor,
             });
         }
-
+        if config.lsp.inline_diagnostics.enable(inner.width) {
+            decorations.add_decoration(InlineDiagnostics::new(
+                doc.diagnostics(),
+                theme,
+                primary_cursor,
+                config.lsp.inline_diagnostics.clone(),
+            ));
+        }
         render_document(
             surface,
             inner,
@@ -218,7 +227,9 @@ impl EditorView {
             }
         }
 
-        Self::render_diagnostics(doc, view, inner, surface, theme);
+        if config.lsp.display_diagnostic_message {
+            Self::render_diagnostics(doc, view, inner, surface, theme);
+        }
 
         let statusline_area = view
             .area
