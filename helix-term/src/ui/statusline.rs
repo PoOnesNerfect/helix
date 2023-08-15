@@ -160,6 +160,7 @@ where
         helix_view::editor::StatusLineElement::Separator => render_separator,
         helix_view::editor::StatusLineElement::Spacer => render_spacer,
         helix_view::editor::StatusLineElement::VersionControl => render_version_control,
+        helix_view::editor::StatusLineElement::Register => render_register,
     }
 }
 
@@ -275,7 +276,7 @@ where
             });
 
     if warnings > 0 || errors > 0 {
-        write(context, format!(" {} ", "W"), None);
+        write(context, " W ".into(), None);
     }
 
     if warnings > 0 {
@@ -488,4 +489,13 @@ where
         .to_string();
 
     write(context, head, None);
+}
+
+fn render_register<F>(context: &mut RenderContext, write: F)
+where
+    F: Fn(&mut RenderContext, String, Option<Style>) + Copy,
+{
+    if let Some(reg) = context.editor.selected_register {
+        write(context, format!(" reg={} ", reg), None)
+    }
 }

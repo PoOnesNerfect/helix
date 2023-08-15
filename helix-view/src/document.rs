@@ -8,7 +8,6 @@ use helix_core::doc_formatter::TextFormat;
 use helix_core::encoding::Encoding;
 use helix_core::syntax::{Highlight, LanguageServerFeature};
 use helix_core::text_annotations::{InlineAnnotation, TextAnnotations};
-use helix_core::Range;
 use helix_vcs::{DiffHandle, DiffProviderRegistry};
 
 use ::parking_lot::Mutex;
@@ -31,8 +30,7 @@ use helix_core::{
     indent::{auto_detect_indent_style, IndentStyle},
     line_ending::auto_detect_line_ending,
     syntax::{self, LanguageConfiguration},
-    ChangeSet, Diagnostic, LineEnding, Rope, RopeBuilder, Selection, Syntax, Transaction,
-    DEFAULT_LINE_ENDING,
+    ChangeSet, Diagnostic, LineEnding, Range, Rope, RopeBuilder, Selection, Syntax, Transaction,
 };
 
 use crate::editor::{Config, RedrawHandle};
@@ -399,33 +397,11 @@ pub fn from_reader<R: std::io::Read + ?Sized>(
     let mut buf_out = [0u8; BUF_SIZE];
     let mut builder = RopeBuilder::new();
 
-    // By default, the encoding of the text is auto-detected by
-    // `encoding_rs` for_bom, and if it fails, from `chardetng`
-    // crate which requires sample data from the reader.
-    // As a manual override to this auto-detection is possible, the
-    // same data is read into `buf` to ensure symmetry in the upcoming
-    // loop.
-    let (encoding, has_bom, mut decoder, mut slice, mut is_empty) = {
-        let read = reader.read(&mut buf)?;
-        let is_empty = read == 0;
-        let (encoding, has_bom) = encoding
-            .map(|encoding| (encoding, false))
-            .or_else(|| {
-                encoding::Encoding::for_bom(&buf).map(|(encoding, _bom_size)| (encoding, true))
-            })
-            .unwrap_or_else(|| {
-                let mut encoding_detector = chardetng::EncodingDetector::new();
-                encoding_detector.feed(&buf, is_empty);
-                (encoding_detector.guess(None, true), false)
-            });
+    let (encoding, has_bom, mut decoder, read) =
+        read_and_detect_encoding(reader, encoding, &mut buf)?;
 
-        let decoder = encoding.new_decoder();
-
-        // If the amount of bytes read from the reader is less than
-        // `buf.len()`, it is undesirable to read the bytes afterwards.
-        let slice = &buf[..read];
-        (encoding, has_bom, decoder, slice, is_empty)
-    };
+    let mut slice = &buf[..read];
+    let mut is_empty = read == 0;
 
     // `RopeBuilder::append()` expects a `&str`, so this is the "real"
     // output buffer. When decoding, the number of bytes in the output
@@ -493,6 +469,81 @@ pub fn from_reader<R: std::io::Read + ?Sized>(
     }
     let rope = builder.finish();
     Ok((rope, encoding, has_bom))
+}
+
+pub fn read_to_string<R: std::io::Read + ?Sized>(
+    reader: &mut R,
+    encoding: Option<&'static Encoding>,
+) -> Result<(String, &'static Encoding, bool), Error> {
+    let mut buf = [0u8; BUF_SIZE];
+
+    let (encoding, has_bom, mut decoder, read) =
+        read_and_detect_encoding(reader, encoding, &mut buf)?;
+
+    let mut slice = &buf[..read];
+    let mut is_empty = read == 0;
+    let mut buf_string = String::with_capacity(buf.len());
+
+    loop {
+        let mut total_read = 0usize;
+
+        loop {
+            let (result, read, ..) =
+                decoder.decode_to_string(&slice[total_read..], &mut buf_string, is_empty);
+
+            total_read += read;
+
+            match result {
+                encoding::CoderResult::InputEmpty => {
+                    debug_assert_eq!(slice.len(), total_read);
+                    break;
+                }
+                encoding::CoderResult::OutputFull => {
+                    debug_assert!(slice.len() > total_read);
+                    buf_string.reserve(buf.len())
+                }
+            }
+        }
+
+        if is_empty {
+            debug_assert_eq!(reader.read(&mut buf)?, 0);
+            break;
+        }
+
+        let read = reader.read(&mut buf)?;
+        slice = &buf[..read];
+        is_empty = read == 0;
+    }
+    Ok((buf_string, encoding, has_bom))
+}
+
+/// Reads the first chunk from a Reader into the given buffer
+/// and detects the encoding.
+///
+/// By default, the encoding of the text is auto-detected by
+/// `encoding_rs` for_bom, and if it fails, from `chardetng`
+/// crate which requires sample data from the reader.
+/// As a manual override to this auto-detection is possible, the
+/// same data is read into `buf` to ensure symmetry in the upcoming
+/// loop.
+fn read_and_detect_encoding<R: std::io::Read + ?Sized>(
+    reader: &mut R,
+    encoding: Option<&'static Encoding>,
+    buf: &mut [u8],
+) -> Result<(&'static Encoding, bool, encoding::Decoder, usize), Error> {
+    let read = reader.read(buf)?;
+    let is_empty = read == 0;
+    let (encoding, has_bom) = encoding
+        .map(|encoding| (encoding, false))
+        .or_else(|| encoding::Encoding::for_bom(buf).map(|(encoding, _bom_size)| (encoding, true)))
+        .unwrap_or_else(|| {
+            let mut encoding_detector = chardetng::EncodingDetector::new();
+            encoding_detector.feed(buf, is_empty);
+            (encoding_detector.guess(None, true), false)
+        });
+    let decoder = encoding.new_decoder();
+
+    Ok((encoding, has_bom, decoder, read))
 }
 
 // The documentation and implementation of this function should be up-to-date with
@@ -590,7 +641,8 @@ impl Document {
         config: Arc<dyn DynAccess<Config>>,
     ) -> Self {
         let (encoding, has_bom) = encoding_with_bom_info.unwrap_or((encoding::UTF_8, false));
-        let changes = ChangeSet::new(&text);
+        let line_ending = config.load().default_line_ending.into();
+        let changes = ChangeSet::new(text.slice(..));
         let old_state = None;
 
         Self {
@@ -603,7 +655,7 @@ impl Document {
             inlay_hints: HashMap::default(),
             inlay_hints_oudated: false,
             indent_style: DEFAULT_INDENT,
-            line_ending: DEFAULT_LINE_ENDING,
+            line_ending,
             restore_cursor: false,
             syntax: None,
             language: None,
@@ -623,10 +675,13 @@ impl Document {
             focused_at: std::time::Instant::now(),
         }
     }
+
     pub fn default(config: Arc<dyn DynAccess<Config>>) -> Self {
-        let text = Rope::from(DEFAULT_LINE_ENDING.as_str());
+        let line_ending: LineEnding = config.load().default_line_ending.into();
+        let text = Rope::from(line_ending.as_str());
         Self::from(text, None, config)
     }
+
     // TODO: async fn?
     /// Create a new document from `path`. Encoding is auto-detected, but it can be manually
     /// overwritten with the `encoding` parameter.
@@ -642,8 +697,9 @@ impl Document {
                 std::fs::File::open(path).context(format!("unable to open {:?}", path))?;
             from_reader(&mut file, encoding)?
         } else {
+            let line_ending: LineEnding = config.load().default_line_ending.into();
             let encoding = encoding.unwrap_or(encoding::UTF_8);
-            (Rope::from(DEFAULT_LINE_ENDING.as_str()), encoding, false)
+            (Rope::from(line_ending.as_str()), encoding, false)
         };
 
         let mut doc = Self::from(rope, Some((encoding, has_bom)), config);
@@ -882,19 +938,21 @@ impl Document {
     ) -> Option<Arc<helix_core::syntax::LanguageConfiguration>> {
         config_loader
             .language_config_for_file_name(self.path.as_ref()?)
-            .or_else(|| config_loader.language_config_for_shebang(self.text()))
+            .or_else(|| config_loader.language_config_for_shebang(self.text().slice(..)))
     }
 
     /// Detect the indentation used in the file, or otherwise defaults to the language indentation
     /// configured in `languages.toml`, with a fallback to tabs if it isn't specified. Line ending
-    /// is likewise auto-detected, and will fallback to the default OS line ending.
+    /// is likewise auto-detected, and will remain unchanged if no line endings were detected.
     pub fn detect_indent_and_line_ending(&mut self) {
         self.indent_style = auto_detect_indent_style(&self.text).unwrap_or_else(|| {
             self.language_config()
                 .and_then(|config| config.indent.as_ref())
                 .map_or(DEFAULT_INDENT, |config| IndentStyle::from_str(&config.unit))
         });
-        self.line_ending = auto_detect_line_ending(&self.text).unwrap_or(DEFAULT_LINE_ENDING);
+        if let Some(line_ending) = auto_detect_line_ending(&self.text) {
+            self.line_ending = line_ending;
+        }
     }
 
     /// Reload the document from its path.
@@ -972,7 +1030,7 @@ impl Document {
     ) {
         if let (Some(language_config), Some(loader)) = (language_config, loader) {
             if let Some(highlight_config) = language_config.highlight_config(&loader.scopes()) {
-                self.syntax = Syntax::new(&self.text, highlight_config, loader);
+                self.syntax = Syntax::new(self.text.slice(..), highlight_config, loader);
             }
 
             self.language = Some(language_config);
@@ -1107,7 +1165,11 @@ impl Document {
             // update tree-sitter syntax tree
             if let Some(syntax) = &mut self.syntax {
                 // TODO: no unwrap
-                let res = syntax.update(&old_doc, &self.text, transaction.changes());
+                let res = syntax.update(
+                    old_doc.slice(..),
+                    self.text.slice(..),
+                    transaction.changes(),
+                );
                 if res.is_err() {
                     log::error!("TS parser failed, disabeling TS for the current buffer: {res:?}");
                     self.syntax = None;
@@ -1116,21 +1178,31 @@ impl Document {
 
             let changes = transaction.changes();
 
+            changes.update_positions(
+                self.diagnostics
+                    .iter_mut()
+                    .map(|diagnostic| (&mut diagnostic.range.start, Assoc::After)),
+            );
+            changes.update_positions(
+                self.diagnostics
+                    .iter_mut()
+                    .map(|diagnostic| (&mut diagnostic.range.end, Assoc::After)),
+            );
             // map state.diagnostics over changes::map_pos too
             for diagnostic in &mut self.diagnostics {
-                diagnostic.range.start = changes.map_pos(diagnostic.range.start, Assoc::After);
-                diagnostic.range.end = changes.map_pos(diagnostic.range.end, Assoc::After);
                 diagnostic.line = self.text.char_to_line(diagnostic.range.start);
             }
+
             self.diagnostics
                 .sort_unstable_by_key(|diagnostic| diagnostic.range);
 
             // Update the inlay hint annotations' positions, helping ensure they are displayed in the proper place
             let apply_inlay_hint_changes = |annotations: &mut Rc<[InlineAnnotation]>| {
                 if let Some(data) = Rc::get_mut(annotations) {
-                    for inline in data.iter_mut() {
-                        inline.char_idx = changes.map_pos(inline.char_idx, Assoc::After);
-                    }
+                    changes.update_positions(
+                        data.iter_mut()
+                            .map(|annotation| (&mut annotation.char_idx, Assoc::After)),
+                    );
                 }
             };
 
@@ -1220,7 +1292,7 @@ impl Document {
 
         if success {
             // reset changeset to fix len
-            self.changes = ChangeSet::new(self.text());
+            self.changes = ChangeSet::new(self.text().slice(..));
             // Sync with changes with the jumplist selections.
             view.sync_changes(self);
         }
@@ -1303,7 +1375,7 @@ impl Document {
         }
         if success {
             // reset changeset to fix len
-            self.changes = ChangeSet::new(self.text());
+            self.changes = ChangeSet::new(self.text().slice(..));
             // Sync with changes with the jumplist selections.
             view.sync_changes(self);
         }
@@ -1326,7 +1398,7 @@ impl Document {
             return;
         }
 
-        let new_changeset = ChangeSet::new(self.text());
+        let new_changeset = ChangeSet::new(self.text().slice(..));
         let changes = std::mem::replace(&mut self.changes, new_changeset);
         // Instead of doing this messy merge we could always commit, and based on transaction
         // annotations either add a new layer or compose into the previous one.
@@ -1921,7 +1993,7 @@ mod test {
             Document::default(Arc::new(ArcSwap::new(Arc::new(Config::default()))))
                 .text()
                 .to_string(),
-            DEFAULT_LINE_ENDING.as_str()
+            helix_core::NATIVE_LINE_ENDING.as_str()
         );
     }
 
