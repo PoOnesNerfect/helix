@@ -752,7 +752,9 @@ impl Document {
         config: Arc<dyn DynAccess<Config>>,
     ) -> Self {
         let (encoding, has_bom) = encoding_with_bom_info.unwrap_or((encoding::UTF_8, false));
-        let line_ending = config.load().default_line_ending.into();
+        let loaded_config = config.load();
+        let line_ending = loaded_config.default_line_ending.into();
+        let copilot_auto = loaded_config.lsp.copilot_auto;
         let changes = ChangeSet::new(text.slice(..));
         let old_state = None;
 
@@ -785,6 +787,7 @@ impl Document {
             version_control_head: None,
             focused_at: std::time::Instant::now(),
             readonly: false,
+            copilot_state: Arc::new(Mutex::new(CopilotState::new(copilot_auto))),
         }
     }
 
