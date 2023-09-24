@@ -9,7 +9,10 @@ use helix_core::doc_formatter::TextFormat;
 use helix_core::encoding::Encoding;
 use helix_core::syntax::{Highlight, LanguageServerFeature};
 use helix_core::text_annotations::{InlineAnnotation, TextAnnotations};
-use helix_lsp::util::lsp_pos_to_pos;
+use helix_core::Range;
+use helix_lsp::lsp;
+use helix_lsp::util::{generate_transaction_from_edits, lsp_pos_to_pos};
+use helix_lsp::OffsetEncoding;
 use helix_vcs::{DiffHandle, DiffProviderRegistry};
 
 use ::parking_lot::Mutex;
@@ -32,7 +35,7 @@ use helix_core::{
     indent::{auto_detect_indent_style, IndentStyle},
     line_ending::auto_detect_line_ending,
     syntax::{self, LanguageConfiguration},
-    ChangeSet, Diagnostic, LineEnding, Range, Rope, RopeBuilder, Selection, Syntax, Transaction,
+    ChangeSet, Diagnostic, LineEnding, Rope, RopeBuilder, Selection, Syntax, Transaction,
 };
 
 use crate::editor::Config;
@@ -176,6 +179,123 @@ pub struct Document {
     pub focused_at: std::time::Instant,
 
     pub readonly: bool,
+    pub copilot_state: Arc<Mutex<CopilotState>>,
+}
+
+#[derive(Clone)]
+pub struct CopilotState {
+    idx: Option<usize>,
+    completions: Vec<Completion>,
+    offset_encoding: Option<OffsetEncoding>,
+    auto: bool,
+    in_insert_mode: bool,
+}
+
+impl CopilotState {
+    pub fn new(auto: bool) -> Self {
+        CopilotState {
+            idx: Some(0),
+            completions: vec![],
+            offset_encoding: None,
+            auto,
+            in_insert_mode: false,
+        }
+    }
+
+    pub fn enterered_insert_mode(&mut self) {
+        self.in_insert_mode = true;
+    }
+
+    pub fn exited_insert_mode(&mut self) {
+        self.in_insert_mode = false;
+    }
+
+    pub fn reset_state(&mut self) {
+        self.offset_encoding = None;
+        self.completions.clear();
+
+        if !self.in_insert_mode {
+            self.idx = None;
+            return;
+        }
+
+        self.idx = match self.auto {
+            true => Some(0),
+            false => None,
+        };
+    }
+
+    pub fn show_or_increment_completion(&mut self) {
+        self.idx = Some(match self.idx {
+            None => 0,
+            Some(idx) => (idx + 1).min(self.completions.len().saturating_sub(1)),
+        });
+    }
+
+    pub fn hide_or_decrement_completion(&mut self) {
+        self.idx = match self.idx {
+            None => None,
+            Some(0) => None,
+            Some(idx) => Some(idx - 1),
+        };
+    }
+
+    pub fn populate(
+        &mut self,
+        completion_response: copilot_types::CompletionResponse,
+        doc: &Rope,
+        offset_encoding: OffsetEncoding,
+    ) {
+        self.completions = completion_response
+            .completions
+            .into_iter()
+            .filter_map(|completion| {
+                let pos = lsp_pos_to_pos(doc, completion.position, offset_encoding)?;
+                Some(Completion {
+                    text: completion.text,
+                    pos,
+                    range: completion.range,
+                })
+            })
+            .collect::<Vec<Completion>>();
+
+        self.offset_encoding = Some(offset_encoding);
+    }
+
+    pub fn toggle_auto(&mut self) -> bool {
+        self.auto = !self.auto;
+        self.auto
+    }
+
+    fn get_completion(&self) -> Option<&Completion> {
+        self.completions.get(self.idx?)
+    }
+
+    pub fn get_completion_text_and_pos(&self) -> Option<(&str, usize)> {
+        let Completion { text, pos, .. } = self.get_completion()?;
+        Some((&text, *pos))
+    }
+
+    pub fn get_transaction(&self, doc: &Rope) -> Option<Transaction> {
+        let completion = self.get_completion()?;
+        let edit = lsp::TextEdit {
+            range: completion.range,
+            new_text: completion.text.to_string(),
+        };
+
+        Some(generate_transaction_from_edits(
+            doc,
+            vec![edit],
+            self.offset_encoding?,
+        ))
+    }
+}
+
+#[derive(Clone)]
+pub struct Completion {
+    pub text: String,
+    pub pos: usize,
+    range: lsp::Range,
 }
 
 /// Inlay hints for a single `(Document, View)` combo.
