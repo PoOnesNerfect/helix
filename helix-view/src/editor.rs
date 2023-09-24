@@ -2000,6 +2000,9 @@ impl Editor {
             doc.set_selection(view.id, selection);
             doc.restore_cursor = false;
         }
+        let mut copilot_state = doc.copilot_state.lock();
+        copilot_state.exited_insert_mode();
+        copilot_state.reset_state();
     }
 
     pub fn current_stack_frame(&self) -> Option<&StackFrame> {

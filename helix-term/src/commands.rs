@@ -2643,6 +2643,12 @@ fn ensure_selections_forward(cx: &mut Context) {
 }
 
 fn enter_insert_mode(cx: &mut Context) {
+    let (view, doc) = current!(cx.editor);
+    let mut copilot_state = doc.copilot_state.lock();
+    copilot_state.enterered_insert_mode();
+    copilot_state.reset_state();
+    doc.send_copilot_completion(view.id);
+
     cx.editor.mode = Mode::Insert;
 }
 

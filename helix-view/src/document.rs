@@ -1409,6 +1409,10 @@ impl Document {
                 apply_inlay_hint_changes(padding_after_inlay_hints);
             }
 
+            let mut copilot_state = self.copilot_state.lock();
+            copilot_state.reset_state();
+            self.send_copilot_completion(view_id);
+
             if emit_lsp_notification {
                 // TODO: move to hook
                 // emit lsp notification
