@@ -742,7 +742,7 @@ where
     *mut_ref = f(mem::take(mut_ref));
 }
 
-use helix_lsp::{lsp, Client, LanguageServerName};
+use helix_lsp::{copilot_types, Client, LanguageServerName};
 use url::Url;
 
 impl Document {
@@ -1427,6 +1427,58 @@ impl Document {
             }
         }
         success
+    }
+
+    pub fn send_copilot_completion(&self, view_id: ViewId) {
+        if let Some(copilot_ls) = self
+            .language_servers()
+            .filter(|ls| ls.name() == "copilot")
+            .next()
+        {
+            if let Some(doc) = self.copilot_document(view_id, copilot_ls.offset_encoding()) {
+                let doc_text = self.text().clone();
+                let offset_encoding = copilot_ls.offset_encoding();
+
+                let copilot_completion = copilot_ls.copilot_completion(doc);
+                let copilot_state = self.copilot_state.clone();
+
+                tokio::spawn(async move {
+                    let future = match copilot_completion {
+                        Some(f) => f,
+                        None => return,
+                    };
+
+                    let response = match future.await {
+                        Ok(Some(r)) => r,
+                        _ => return,
+                    };
+
+                    let mut state = copilot_state.lock();
+                    (*state).populate(response, &doc_text, offset_encoding);
+                });
+            }
+        }
+    }
+
+    fn copilot_document(
+        &self,
+        view_id: ViewId,
+        offset_encoding: helix_lsp::OffsetEncoding,
+    ) -> Option<copilot_types::Document> {
+        let position = self.position(view_id, offset_encoding);
+
+        Some(copilot_types::Document {
+            tab_size: self.tab_width(),
+            insert_spaces: true,
+            path: self.path()?.to_str()?.to_owned(),
+            indent_size: self.indent_width(),
+            version: self.version() as u32,
+            relative_path: self.relative_path()?.to_str()?.to_owned(),
+            language_id: self.language_id()?.to_owned(),
+            position,
+            source: self.text().to_string(),
+            uri: self.url()?.to_string(),
+        })
     }
 
     fn apply_inner(
