@@ -28,7 +28,7 @@ use helix_view::{
     graphics::{Color, CursorKind, Modifier, Rect, Style},
     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
     keyboard::{KeyCode, KeyModifiers},
-    Document, Editor, Theme, View,
+    view, Document, Editor, Theme, View,
 };
 use std::{mem::take, num::NonZeroUsize, path::PathBuf, rc::Rc, sync::Arc};
 
@@ -37,6 +37,7 @@ use tui::{buffer::Buffer as Surface, text::Span};
 use super::document::LineDecoration;
 use super::lsp::SignatureHelp;
 use super::{completion::CompletionItem, statusline};
+use super::{lsp::SignatureHelp, text_decorations::CopilotDecoration};
 
 pub struct EditorView {
     pub keymaps: Keymaps,
@@ -201,7 +202,18 @@ impl EditorView {
                 primary_cursor,
                 config.lsp.inline_diagnostics.clone(),
             ));
+        };
+
+        if let Some((text, pos)) = doc.copilot_state.lock().get_completion_text_and_pos() {
+            decorations.add_decoration(CopilotDecoration::new(
+                theme.get("ui.text.focused"),
+                doc.text().slice(..),
+                text.to_string(),
+                pos,
+                inner.width,
+            ));
         }
+
         render_document(
             surface,
             inner,
