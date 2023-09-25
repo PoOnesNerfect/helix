@@ -1538,7 +1538,6 @@ impl Client {
         Some(async move {
             let json = request.await?;
             let response: Option<copilot_types::CompletionResponse> = serde_json::from_value(json)?;
-            log::error!("copilot reponse is {:?}", response);
             Ok(response)
         })
     }
