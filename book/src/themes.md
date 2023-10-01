@@ -70,6 +70,7 @@ over it and is merged into the default palette.
 
 | Color Name      |
 | ---             |
+| `default`       |
 | `black`         |
 | `red`           |
 | `green`         |
@@ -244,9 +245,12 @@ We use a similar set of scopes as
 
 - `diff` - version control changes
   - `plus` - additions
+    - `gutter` - gutter indicator
   - `minus` - deletions
+    - `gutter` - gutter indicator
   - `delta` - modifications
     - `moved` - renamed or moved files/changes
+    - `gutter` - gutter indicator
 
 #### Interface
 

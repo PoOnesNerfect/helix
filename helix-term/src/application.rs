@@ -251,22 +251,19 @@ impl Application {
     }
 
     async fn render(&mut self) {
+        if self.compositor.full_redraw {
+            self.terminal.clear().expect("Cannot clear the terminal");
+            self.compositor.full_redraw = false;
+        }
+
         let mut cx = crate::compositor::Context {
             editor: &mut self.editor,
             jobs: &mut self.jobs,
             scroll: None,
         };
 
-        // Acquire mutable access to the redraw_handle lock
-        // to ensure that there are no tasks running that want to block rendering
-        drop(cx.editor.redraw_handle.1.write().await);
+        helix_event::start_frame();
         cx.editor.needs_redraw = false;
-        {
-            // exhaust any leftover redraw notifications
-            let notify = cx.editor.redraw_handle.0.notified();
-            tokio::pin!(notify);
-            notify.enable();
-        }
 
         let area = self
             .terminal
@@ -288,7 +285,7 @@ impl Application {
 
     pub async fn event_loop<S>(&mut self, input_stream: &mut S)
     where
-        S: Stream<Item = crossterm::Result<crossterm::event::Event>> + Unpin,
+        S: Stream<Item = std::io::Result<crossterm::event::Event>> + Unpin,
     {
         self.render().await;
 
@@ -301,7 +298,7 @@ impl Application {
 
     pub async fn event_loop_until_idle<S>(&mut self, input_stream: &mut S) -> bool
     where
-        S: Stream<Item = crossterm::Result<crossterm::event::Event>> + Unpin,
+        S: Stream<Item = std::io::Result<crossterm::event::Event>> + Unpin,
     {
         loop {
             if self.editor.should_close() {
@@ -590,7 +587,7 @@ impl Application {
             EditorEvent::LanguageServerMessage((id, call)) => {
                 self.handle_language_server_message(call, id).await;
                 // limit render calls for fast language server messages
-                self.editor.redraw_handle.0.notify_one();
+                helix_event::request_redraw();
             }
             EditorEvent::DebuggerEvent(payload) => {
                 let needs_render = self.editor.handle_debugger_message(payload).await;
@@ -615,10 +612,7 @@ impl Application {
         false
     }
 
-    pub async fn handle_terminal_events(
-        &mut self,
-        event: Result<CrosstermEvent, crossterm::ErrorKind>,
-    ) {
+    pub async fn handle_terminal_events(&mut self, event: std::io::Result<CrosstermEvent>) {
         let mut cx = crate::compositor::Context {
             editor: &mut self.editor,
             jobs: &mut self.jobs,
@@ -1159,7 +1153,7 @@ impl Application {
 
     pub async fn run<S>(&mut self, input_stream: &mut S) -> Result<i32, Error>
     where
-        S: Stream<Item = crossterm::Result<crossterm::event::Event>> + Unpin,
+        S: Stream<Item = std::io::Result<crossterm::event::Event>> + Unpin,
     {
         self.claim_term().await?;
 
