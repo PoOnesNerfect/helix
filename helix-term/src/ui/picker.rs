@@ -11,7 +11,7 @@ use crate::{
     },
 };
 use futures_util::{future::BoxFuture, FutureExt};
-use nucleo::pattern::CaseMatching;
+use nucleo::{pattern::CaseMatching, Status};
 use nucleo::{Config, Nucleo, Utf32String};
 use tui::{
     buffer::Buffer as Surface,
@@ -46,7 +46,11 @@ use helix_view::{
     Document, DocumentId, Editor,
 };
 
+pub mod interactive;
+
 pub const ID: &str = "picker";
+use self::interactive::InteractivePicker;
+
 use super::{menu::Item, overlay::Overlay};
 
 pub const MIN_AREA_WIDTH_FOR_PREVIEW: u16 = 72;
@@ -443,6 +447,105 @@ impl<T: Item + 'static> Picker<T> {
         }
     }
 
+    // direct copy of `handle_event`, taken out to be used by interactive picker
+    fn handle_event_inner(
+        &mut self,
+        event: &Event,
+        ctx: &mut Context,
+        text_event_handler: impl FnOnce(&mut Self, &Event, &mut Context) -> EventResult,
+    ) -> EventResult {
+        if let Event::IdleTimeout = event {
+            return self.handle_idle_timeout(ctx);
+        }
+        // TODO: keybinds for scrolling preview
+
+        let key_event = match event {
+            Event::Key(event) => *event,
+            Event::Paste(..) => return text_event_handler(self, event, ctx),
+            Event::Resize(..) => return EventResult::Consumed(None),
+            _ => return EventResult::Ignored(None),
+        };
+
+        let close_fn = |picker: &mut Self| {
+            // if the picker is very large don't store it as last_picker to avoid
+            // excessive memory consumption
+            let callback: compositor::Callback = if picker.matcher.snapshot().item_count() > 100_000
+            {
+                Box::new(|compositor: &mut Compositor, _ctx| {
+                    // remove the layer
+                    compositor.pop();
+                })
+            } else {
+                // stop streaming in new items in the background, really we should
+                // be restarting the stream somehow once the picker gets
+                // reopened instead (like for an FS crawl) that would also remove the
+                // need for the special case above but that is pretty tricky
+                picker.shutdown.store(true, atomic::Ordering::Relaxed);
+                Box::new(|compositor: &mut Compositor, _ctx| {
+                    // remove the layer
+                    compositor.last_picker = compositor.pop();
+                })
+            };
+            EventResult::Consumed(Some(callback))
+        };
+
+        // So that idle timeout retriggers
+        ctx.editor.reset_idle_timer();
+
+        match key_event {
+            shift!(Tab) | key!(Up) | ctrl!('p') => {
+                self.move_by(1, Direction::Backward);
+            }
+            key!(Tab) | key!(Down) | ctrl!('n') => {
+                self.move_by(1, Direction::Forward);
+            }
+            key!(PageDown) | ctrl!('d') => {
+                self.page_down();
+            }
+            key!(PageUp) | ctrl!('u') => {
+                self.page_up();
+            }
+            key!(Home) => {
+                self.to_start();
+            }
+            key!(End) => {
+                self.to_end();
+            }
+            key!(Esc) | ctrl!('c') => return close_fn(self),
+            alt!(Enter) => {
+                if let Some(option) = self.selection() {
+                    (self.callback_fn)(ctx, option, Action::Load);
+                }
+            }
+            key!(Enter) => {
+                if let Some(option) = self.selection() {
+                    (self.callback_fn)(ctx, option, Action::Replace);
+                }
+                return close_fn(self);
+            }
+            ctrl!('s') => {
+                if let Some(option) = self.selection() {
+                    (self.callback_fn)(ctx, option, Action::HorizontalSplit);
+                }
+                return close_fn(self);
+            }
+            ctrl!('v') => {
+                if let Some(option) = self.selection() {
+                    (self.callback_fn)(ctx, option, Action::VerticalSplit);
+                }
+                return close_fn(self);
+            }
+            ctrl!('t') => {
+                self.toggle_preview();
+            }
+            _ => {
+                text_event_handler(self, event, ctx);
+            }
+        }
+
+        EventResult::Consumed(None)
+    }
+
     fn handle_idle_timeout(&mut self, cx: &mut Context) -> EventResult {
         let Some((current_file, _)) = self.current_file(cx.editor) else {
             return EventResult::Consumed(None);
@@ -476,9 +579,12 @@ impl<T: Item + 'static> Picker<T> {
                         };
                         let picker = match compositor.find::<Overlay<Self>>() {
                             Some(Overlay { content, .. }) => Some(content),
-                            None => compositor
-                                .find::<Overlay<DynamicPicker<T>>>()
-                                .map(|overlay| &mut overlay.content.file_picker),
+                            None => match compositor.find::<Overlay<DynamicPicker<T>>>() {
+                                Some(Overlay { content, .. }) => Some(&mut content.file_picker),
+                                None => compositor
+                                    .find::<Overlay<InteractivePicker<T>>>()
+                                    .map(|overlay| &mut overlay.content.file_picker),
+                            },
                         };
                         let Some(picker) = picker else {
                             log::info!("picker closed before syntax highlighting finished");
@@ -527,10 +633,6 @@ impl<T: Item + 'static> Picker<T> {
                 .min(snapshot.matched_item_count().saturating_sub(1))
         }
 
-        let text_style = cx.editor.theme.get("ui.text");
-        let selected = cx.editor.theme.get("ui.text.focus");
-        let highlight_style = cx.editor.theme.get("special").add_modifier(Modifier::BOLD);
-
         // -- Render the frame:
         // clear area
         let background = cx.editor.theme.get("ui.background");
@@ -543,6 +645,22 @@ impl<T: Item + 'static> Picker<T> {
         let inner = block.inner(area);
 
         block.render(area, surface);
+
+        self.render_picker_inner(inner, surface, status, cx);
+    }
+
+    fn render_picker_inner(
+        &mut self,
+        inner: Rect,
+        surface: &mut Surface,
+        status: Status,
+        cx: &mut Context,
+    ) {
+        let snapshot = self.matcher.snapshot();
+
+        let text_style = cx.editor.theme.get("ui.text");
+        let selected = cx.editor.theme.get("ui.text.focus");
+        let highlight_style = cx.editor.theme.get("special").add_modifier(Modifier::BOLD);
 
         // -- Render the input bar:
 
@@ -825,96 +943,7 @@ impl<T: Item + 'static + Send + Sync> Component for Picker<T> {
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &mut Context) -> EventResult {
-        if let Event::IdleTimeout = event {
-            return self.handle_idle_timeout(ctx);
-        }
-        // TODO: keybinds for scrolling preview
-
-        let key_event = match event {
-            Event::Key(event) => *event,
-            Event::Paste(..) => return self.prompt_handle_event(event, ctx),
-            Event::Resize(..) => return EventResult::Consumed(None),
-            _ => return EventResult::Ignored(None),
-        };
-
-        let close_fn = |picker: &mut Self| {
-            // if the picker is very large don't store it as last_picker to avoid
-            // excessive memory consumption
-            let callback: compositor::Callback = if picker.matcher.snapshot().item_count() > 100_000
-            {
-                Box::new(|compositor: &mut Compositor, _ctx| {
-                    // remove the layer
-                    compositor.pop();
-                })
-            } else {
-                // stop streaming in new items in the background, really we should
-                // be restarting the stream somehow once the picker gets
-                // reopened instead (like for an FS crawl) that would also remove the
-                // need for the special case above but that is pretty tricky
-                picker.shutdown.store(true, atomic::Ordering::Relaxed);
-                Box::new(|compositor: &mut Compositor, _ctx| {
-                    // remove the layer
-                    compositor.last_picker = compositor.pop();
-                })
-            };
-            EventResult::Consumed(Some(callback))
-        };
-
-        // So that idle timeout retriggers
-        ctx.editor.reset_idle_timer();
-
-        match key_event {
-            shift!(Tab) | key!(Up) | ctrl!('p') => {
-                self.move_by(1, Direction::Backward);
-            }
-            key!(Tab) | key!(Down) | ctrl!('n') => {
-                self.move_by(1, Direction::Forward);
-            }
-            key!(PageDown) | ctrl!('d') => {
-                self.page_down();
-            }
-            key!(PageUp) | ctrl!('u') => {
-                self.page_up();
-            }
-            key!(Home) => {
-                self.to_start();
-            }
-            key!(End) => {
-                self.to_end();
-            }
-            key!(Esc) | ctrl!('c') => return close_fn(self),
-            alt!(Enter) => {
-                if let Some(option) = self.selection() {
-                    (self.callback_fn)(ctx, option, Action::Load);
-                }
-            }
-            key!(Enter) => {
-                if let Some(option) = self.selection() {
-                    (self.callback_fn)(ctx, option, Action::Replace);
-                }
-                return close_fn(self);
-            }
-            ctrl!('s') => {
-                if let Some(option) = self.selection() {
-                    (self.callback_fn)(ctx, option, Action::HorizontalSplit);
-                }
-                return close_fn(self);
-            }
-            ctrl!('v') => {
-                if let Some(option) = self.selection() {
-                    (self.callback_fn)(ctx, option, Action::VerticalSplit);
-                }
-                return close_fn(self);
-            }
-            ctrl!('t') => {
-                self.toggle_preview();
-            }
-            _ => {
-                self.prompt_handle_event(event, ctx);
-            }
-        }
-
-        EventResult::Consumed(None)
+        self.handle_event_inner(event, ctx, |this, e, cx| this.prompt_handle_event(e, cx))
     }
 
     fn cursor(&self, area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
