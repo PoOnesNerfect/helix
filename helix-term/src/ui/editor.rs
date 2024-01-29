@@ -34,8 +34,9 @@ use std::{mem::take, num::NonZeroUsize, path::PathBuf, rc::Rc, sync::Arc};
 
 use tui::{buffer::Buffer as Surface, text::Span};
 
-use super::{completion::CompletionItem, statusline};
-use super::{lsp::SignatureHelp, text_decorations::CopilotDecoration};
+use super::{
+    completion::CompletionItem, statusline, text_decorations::CopilotDecoration, Explorer,
+};
 
 pub struct EditorView {
     pub keymaps: Keymaps,
@@ -190,7 +191,7 @@ impl EditorView {
             .cursor(doc.text().slice(..));
 
         if is_focused {
-            let cursor = doc
+            let _cursor = doc
                 .selection(view.id)
                 .primary()
                 .cursor(doc.text().slice(..));

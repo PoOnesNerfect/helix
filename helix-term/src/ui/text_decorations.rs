@@ -6,7 +6,7 @@ use helix_core::{
     text_annotations::TextAnnotations,
     Position, RopeSlice,
 };
-use helix_view::{editor::CursorCache, theme::Style};
+use helix_view::theme::Style;
 
 use crate::ui::document::{LinePos, TextRenderer};
 
