@@ -273,7 +273,7 @@ pub struct TreeView<T: TreeViewItem> {
     search_str: String,
 
     /// Selected item idex
-    selected: usize,
+    pub selected: usize,
 
     backward_jumps: Vec<usize>,
     forward_jumps: Vec<usize>,
@@ -1075,7 +1075,7 @@ impl<T: TreeViewItem + Clone> TreeView<T> {
                 key!('k') | key!(Up) | ctrl!('p') => self.move_up(1.max(count)),
                 key!('h') | key!(Left) => self.move_to_parent()?,
                 key!('l') | key!(Right) => self.move_to_children()?,
-                key!(Enter) | key!('o') => self.on_enter(cx, params, self.selected)?,
+                key!('o') => self.on_enter(cx, params, self.selected)?,
                 ctrl!('d') => self.move_down_half_page(),
                 ctrl!('u') => self.move_up_half_page(),
                 key!('z') => {

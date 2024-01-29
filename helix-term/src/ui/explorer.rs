@@ -706,6 +706,11 @@ impl Component for Explorer {
                 key!('r') => self.new_rename_prompt(cx)?,
                 key!('-') | key!('_') => self.decrease_size(),
                 key!('+') | key!('=') => self.increase_size(),
+                key!(Enter) => {
+                    self.close();
+                    self.tree
+                        .on_enter(cx, &mut self.state, self.tree.selected)?
+                }
                 _ => {
                     self.tree
                         .handle_event(&Event::Key(*key_event), cx, &mut self.state);
