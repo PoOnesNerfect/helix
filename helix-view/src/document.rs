@@ -8,7 +8,7 @@ use helix_core::chars::char_is_word;
 use helix_core::doc_formatter::TextFormat;
 use helix_core::encoding::Encoding;
 use helix_core::syntax::{Highlight, LanguageServerFeature};
-use helix_core::text_annotations::{InlineAnnotation, TextAnnotations};
+use helix_core::text_annotations::InlineAnnotation;
 use helix_core::Range;
 use helix_lsp::lsp;
 use helix_lsp::util::{generate_transaction_from_edits, lsp_pos_to_pos};

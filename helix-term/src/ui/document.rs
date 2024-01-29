@@ -138,6 +138,9 @@ pub fn render_text<'t>(
     let mut syntax_style_span = syntax_styles
         .next()
         .unwrap_or_else(|| (Style::default(), usize::MAX));
+    let mut overlay_style_span = overlay_styles
+        .next()
+        .unwrap_or_else(|| (Style::default(), usize::MAX));
     let mut reached_view_top = false;
 
     loop {
@@ -145,8 +148,15 @@ pub fn render_text<'t>(
 
         // skip any graphemes on visual lines before the block start
         if grapheme.visual_pos.row < row_off {
-            if grapheme.char_idx >= style_span.1 {
-                style_span = if let Some(style_span) = styles.next() {
+            if grapheme.char_idx >= syntax_style_span.1 {
+                syntax_style_span = if let Some(style_span) = syntax_styles.next() {
+                    style_span
+                } else {
+                    break;
+                }
+            }
+            if grapheme.char_idx >= overlay_style_span.1 {
+                overlay_style_span = if let Some(style_span) = overlay_styles.next() {
                     style_span
                 } else {
                     break;
@@ -186,27 +196,38 @@ pub fn render_text<'t>(
         }
 
         // acquire the correct grapheme style
-        while grapheme.char_idx >= style_span.1 {
-            style_span = styles.next().unwrap_or((Style::default(), usize::MAX));
+        while grapheme.char_idx >= syntax_style_span.1 {
+            syntax_style_span = syntax_styles
+                .next()
+                .unwrap_or((Style::default(), usize::MAX));
+        }
+        while grapheme.char_idx >= overlay_style_span.1 {
+            overlay_style_span = overlay_styles
+                .next()
+                .unwrap_or((Style::default(), usize::MAX));
         }
 
-        let grapheme_style = if let GraphemeSource::VirtualText { highlight } = grapheme.source {
-            let style = renderer.text_style;
-            if let Some(highlight) = highlight {
-                style.patch(theme.highlight(highlight.0))
+        let (syntax_style, overlay_style) =
+            if let GraphemeSource::VirtualText { highlight } = grapheme.source {
+                let mut style = renderer.text_style;
+                if let Some(highlight) = highlight {
+                    style = style.patch(theme.highlight(highlight.0));
+                }
+
+                (style, Style::default())
             } else {
-                style
-            }
-        } else {
-            style_span.0
-        };
+                (syntax_style_span.0, overlay_style_span.0)
+            };
         decorations.decorate_grapheme(renderer, &grapheme);
 
         let is_virtual = grapheme.is_virtual();
         renderer.draw_grapheme(
             grapheme.raw,
-            grapheme_style,
-            virt,
+            GraphemeStyle {
+                syntax_style,
+                overlay_style,
+            },
+            is_virtual,
             &mut last_line_indent_level,
             &mut is_in_indent_area,
             grapheme.visual_pos,

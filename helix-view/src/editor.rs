@@ -1874,7 +1874,15 @@ impl Editor {
     pub fn cursor(&self) -> (Option<Position>, CursorKind) {
         let config = self.config();
         let (view, doc) = current_ref!(self);
-        if let Some(mut pos) = self.cursor_cache.get(view, doc) {
+        let cursor = doc
+            .selection(view.id)
+            .primary()
+            .cursor(doc.text().slice(..));
+        let pos = self
+            .cursor_cache
+            .get()
+            .unwrap_or_else(|| view.screen_coords_at_pos(doc, doc.text().slice(..), cursor));
+        if let Some(mut pos) = pos {
             let inner = view.inner_area(doc);
             pos.col += inner.x as usize;
             pos.row += inner.y as usize;

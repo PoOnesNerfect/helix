@@ -1,10 +1,10 @@
-use std::cmp::Ordering;
+use std::{cell::Cell, cmp::Ordering};
 
 use helix_core::{
     coords_at_pos,
     doc_formatter::{DocumentFormatter, FormattedGrapheme, TextFormat},
     text_annotations::TextAnnotations,
-    RopeSlice,
+    Position, RopeSlice,
 };
 use helix_view::{editor::CursorCache, theme::Style};
 
@@ -147,7 +147,7 @@ impl<'a> DecorationManager<'a> {
 /// Cursor rendering is done externally so all the cursor decoration
 /// does is save the position of primary cursor
 pub struct Cursor<'a> {
-    pub cache: &'a CursorCache,
+    pub cache: &'a Cell<Option<Option<Position>>>,
     pub primary_cursor: usize,
 }
 impl Decoration for Cursor<'_> {
@@ -167,7 +167,7 @@ impl Decoration for Cursor<'_> {
         if renderer.column_in_bounds(grapheme.visual_pos.col) {
             let mut position = grapheme.visual_pos;
             position.col -= renderer.col_offset;
-            self.cache.set(Some(position));
+            self.cache.set(Some(Some(position)));
         }
         usize::MAX
     }

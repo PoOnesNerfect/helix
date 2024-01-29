@@ -34,8 +34,6 @@ use std::{mem::take, num::NonZeroUsize, path::PathBuf, rc::Rc, sync::Arc};
 
 use tui::{buffer::Buffer as Surface, text::Span};
 
-use super::document::LineDecoration;
-use super::lsp::SignatureHelp;
 use super::{completion::CompletionItem, statusline};
 use super::{lsp::SignatureHelp, text_decorations::CopilotDecoration};
 
@@ -190,6 +188,13 @@ impl EditorView {
             .cursor(doc.text().slice(..));
 
         if is_focused {
+            let cursor = doc
+                .selection(view.id)
+                .primary()
+                .cursor(doc.text().slice(..));
+            // set the cursor_cache to out of view in case the position is not found
+            editor.cursor_cache.set(Some(None));
+
             decorations.add_decoration(text_decorations::Cursor {
                 cache: &editor.cursor_cache,
                 primary_cursor,
