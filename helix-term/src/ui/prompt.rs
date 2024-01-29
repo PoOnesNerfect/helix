@@ -101,6 +101,9 @@ impl Prompt {
     pub fn prompt(&self) -> &str {
         self.prompt.as_ref()
     }
+    pub fn set_prompt(&mut self, prompt: Cow<'static, str>) {
+        self.prompt = prompt;
+    }
     pub fn with_language(mut self, language: &'static str, loader: Arc<syntax::Loader>) -> Self {
         self.language = Some((language, loader));
         self

@@ -51,7 +51,10 @@ use crate::{
     filter_picker_entry,
     job::Callback,
     keymap::ReverseKeymap,
-    ui::{self, overlay::overlaid, Picker, Popup, Prompt, PromptEvent},
+    ui::{
+        self, overlay::overlaid, picker::interactive::interactive_search, Picker, Popup, Prompt,
+        PromptEvent,
+    },
 };
 
 use crate::job::{self, Jobs};
@@ -292,6 +295,7 @@ impl MappableCommand {
         search_selection, "Use current selection as search pattern",
         make_search_word_bounded, "Modify current search to make it word bounded",
         global_search, "Global search in workspace folder",
+        interactive_search, "Interactive Global search in workspace folder",
         extend_line, "Select current line, if already selected, extend to another line based on the anchor",
         extend_line_below, "Select current line, if already selected, extend to next line",
         extend_line_above, "Select current line, if already selected, extend to previous line",

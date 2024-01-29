@@ -278,6 +278,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "h" => select_references_to_symbol_under_cursor,
             "?" => command_palette,
             "e" => reveal_current_file,
+            "q" => interactive_search,
         },
         "z" => { "View"
             "z" | "c" => align_view_center,
