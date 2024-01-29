@@ -8,8 +8,11 @@ use helix_core::chars::char_is_word;
 use helix_core::doc_formatter::TextFormat;
 use helix_core::encoding::Encoding;
 use helix_core::syntax::{Highlight, LanguageServerFeature};
-use helix_core::text_annotations::{InlineAnnotation, TextAnnotations};
-use helix_lsp::util::lsp_pos_to_pos;
+use helix_core::text_annotations::InlineAnnotation;
+use helix_core::Range;
+use helix_lsp::lsp;
+use helix_lsp::util::{generate_transaction_from_edits, lsp_pos_to_pos};
+use helix_lsp::OffsetEncoding;
 use helix_vcs::{DiffHandle, DiffProviderRegistry};
 
 use ::parking_lot::Mutex;
@@ -32,7 +35,7 @@ use helix_core::{
     indent::{auto_detect_indent_style, IndentStyle},
     line_ending::auto_detect_line_ending,
     syntax::{self, LanguageConfiguration},
-    ChangeSet, Diagnostic, LineEnding, Range, Rope, RopeBuilder, Selection, Syntax, Transaction,
+    ChangeSet, Diagnostic, LineEnding, Rope, RopeBuilder, Selection, Syntax, Transaction,
 };
 
 use crate::editor::Config;
@@ -97,7 +100,6 @@ impl Serialize for Mode {
         serializer.collect_str(self)
     }
 }
-
 /// A snapshot of the text of a document that we want to write out to disk
 #[derive(Debug, Clone)]
 pub struct DocumentSavedEvent {
@@ -177,6 +179,123 @@ pub struct Document {
     pub focused_at: std::time::Instant,
 
     pub readonly: bool,
+    pub copilot_state: Arc<Mutex<CopilotState>>,
+}
+
+#[derive(Clone)]
+pub struct CopilotState {
+    idx: Option<usize>,
+    completions: Vec<Completion>,
+    offset_encoding: Option<OffsetEncoding>,
+    auto: bool,
+    in_insert_mode: bool,
+}
+
+impl CopilotState {
+    pub fn new(auto: bool) -> Self {
+        CopilotState {
+            idx: Some(0),
+            completions: vec![],
+            offset_encoding: None,
+            auto,
+            in_insert_mode: false,
+        }
+    }
+
+    pub fn enterered_insert_mode(&mut self) {
+        self.in_insert_mode = true;
+    }
+
+    pub fn exited_insert_mode(&mut self) {
+        self.in_insert_mode = false;
+    }
+
+    pub fn reset_state(&mut self) {
+        self.offset_encoding = None;
+        self.completions.clear();
+
+        if !self.in_insert_mode {
+            self.idx = None;
+            return;
+        }
+
+        self.idx = match self.auto {
+            true => Some(0),
+            false => None,
+        };
+    }
+
+    pub fn show_or_increment_completion(&mut self) {
+        self.idx = Some(match self.idx {
+            None => 0,
+            Some(idx) => (idx + 1).min(self.completions.len().saturating_sub(1)),
+        });
+    }
+
+    pub fn hide_or_decrement_completion(&mut self) {
+        self.idx = match self.idx {
+            None => None,
+            Some(0) => None,
+            Some(idx) => Some(idx - 1),
+        };
+    }
+
+    pub fn populate(
+        &mut self,
+        completion_response: copilot_types::CompletionResponse,
+        doc: &Rope,
+        offset_encoding: OffsetEncoding,
+    ) {
+        self.completions = completion_response
+            .completions
+            .into_iter()
+            .filter_map(|completion| {
+                let pos = lsp_pos_to_pos(doc, completion.position, offset_encoding)?;
+                Some(Completion {
+                    text: completion.text,
+                    pos,
+                    range: completion.range,
+                })
+            })
+            .collect::<Vec<Completion>>();
+
+        self.offset_encoding = Some(offset_encoding);
+    }
+
+    pub fn toggle_auto(&mut self) -> bool {
+        self.auto = !self.auto;
+        self.auto
+    }
+
+    fn get_completion(&self) -> Option<&Completion> {
+        self.completions.get(self.idx?)
+    }
+
+    pub fn get_completion_text_and_pos(&self) -> Option<(&str, usize)> {
+        let Completion { text, pos, .. } = self.get_completion()?;
+        Some((&text, *pos))
+    }
+
+    pub fn get_transaction(&self, doc: &Rope) -> Option<Transaction> {
+        let completion = self.get_completion()?;
+        let edit = lsp::TextEdit {
+            range: completion.range,
+            new_text: completion.text.to_string(),
+        };
+
+        Some(generate_transaction_from_edits(
+            doc,
+            vec![edit],
+            self.offset_encoding?,
+        ))
+    }
+}
+
+#[derive(Clone)]
+pub struct Completion {
+    pub text: String,
+    pub pos: usize,
+    range: lsp::Range,
 }
 
 /// Inlay hints for a single `(Document, View)` combo.
@@ -623,7 +742,7 @@ where
     *mut_ref = f(mem::take(mut_ref));
 }
 
-use helix_lsp::{lsp, Client, LanguageServerName};
+use helix_lsp::{copilot_types, Client, LanguageServerName};
 use url::Url;
 
 impl Document {
@@ -633,7 +752,9 @@ impl Document {
         config: Arc<dyn DynAccess<Config>>,
     ) -> Self {
         let (encoding, has_bom) = encoding_with_bom_info.unwrap_or((encoding::UTF_8, false));
-        let line_ending = config.load().default_line_ending.into();
+        let loaded_config = config.load();
+        let line_ending = loaded_config.default_line_ending.into();
+        let copilot_auto = loaded_config.lsp.copilot_auto;
         let changes = ChangeSet::new(text.slice(..));
         let old_state = None;
 
@@ -666,6 +787,7 @@ impl Document {
             version_control_head: None,
             focused_at: std::time::Instant::now(),
             readonly: false,
+            copilot_state: Arc::new(Mutex::new(CopilotState::new(copilot_auto))),
         }
     }
 
@@ -1287,6 +1409,10 @@ impl Document {
                 apply_inlay_hint_changes(padding_after_inlay_hints);
             }
 
+            let mut copilot_state = self.copilot_state.lock();
+            copilot_state.reset_state();
+            self.send_copilot_completion(view_id);
+
             if emit_lsp_notification {
                 // TODO: move to hook
                 // emit lsp notification
@@ -1305,6 +1431,58 @@ impl Document {
             }
         }
         success
+    }
+
+    pub fn send_copilot_completion(&self, view_id: ViewId) {
+        if let Some(copilot_ls) = self
+            .language_servers()
+            .filter(|ls| ls.name() == "copilot")
+            .next()
+        {
+            if let Some(doc) = self.copilot_document(view_id, copilot_ls.offset_encoding()) {
+                let doc_text = self.text().clone();
+                let offset_encoding = copilot_ls.offset_encoding();
+
+                let copilot_completion = copilot_ls.copilot_completion(doc);
+                let copilot_state = self.copilot_state.clone();
+
+                tokio::spawn(async move {
+                    let future = match copilot_completion {
+                        Some(f) => f,
+                        None => return,
+                    };
+
+                    let response = match future.await {
+                        Ok(Some(r)) => r,
+                        _ => return,
+                    };
+
+                    let mut state = copilot_state.lock();
+                    (*state).populate(response, &doc_text, offset_encoding);
+                });
+            }
+        }
+    }
+
+    fn copilot_document(
+        &self,
+        view_id: ViewId,
+        offset_encoding: helix_lsp::OffsetEncoding,
+    ) -> Option<copilot_types::Document> {
+        let position = self.position(view_id, offset_encoding);
+
+        Some(copilot_types::Document {
+            tab_size: self.tab_width(),
+            insert_spaces: true,
+            path: self.path()?.to_str()?.to_owned(),
+            indent_size: self.indent_width(),
+            version: self.version() as u32,
+            relative_path: self.relative_path()?.to_str()?.to_owned(),
+            language_id: self.language_id()?.to_owned(),
+            position,
+            source: self.text().to_string(),
+            uri: self.url()?.to_string(),
+        })
     }
 
     fn apply_inner(
@@ -1887,14 +2065,10 @@ impl Document {
                     .and_then(|soft_wrap| soft_wrap.wrap_at_text_width)
             })
             .or(config.soft_wrap.wrap_at_text_width)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && text_width as u16 > viewport_width;
         if soft_wrap_at_text_width {
-            // We increase max_line_len by 1 because softwrap considers the newline character
-            // as part of the line length while the "typical" expectation is that this is not the case.
-            // In particular other commands like :reflow do not count the line terminator.
-            // This is technically inconsistent for the last line as that line never has a line terminator
-            // but having the last visual line exceed the width by 1 seems like a rare edge case.
-            viewport_width = viewport_width.min(text_width as u16 + 1)
+            viewport_width = text_width as u16;
         }
         let config = self.config.load();
         let editor_soft_wrap = &config.soft_wrap;
@@ -1931,13 +2105,8 @@ impl Document {
             wrap_indicator_highlight: theme
                 .and_then(|theme| theme.find_scope_index("ui.virtual.wrap"))
                 .map(Highlight),
+            soft_wrap_at_text_width,
         }
-    }
-
-    /// Get the text annotations that apply to the whole document, those that do not apply to any
-    /// specific view.
-    pub fn text_annotations(&self, _theme: Option<&Theme>) -> TextAnnotations {
-        TextAnnotations::default()
     }
 
     /// Set the inlay hints for this document and `view_id`.

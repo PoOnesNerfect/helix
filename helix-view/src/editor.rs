@@ -1,5 +1,6 @@
 use crate::{
     align_view,
+    annotations::diagnostics::InlineDiagnosticsConfig,
     document::{DocumentSavedEventFuture, DocumentSavedEventResult, Mode, SavePoint},
     graphics::{CursorKind, Rect},
     handlers::Handlers,
@@ -416,6 +417,11 @@ pub struct LspConfig {
     pub snippets: bool,
     /// Whether to include declaration in the goto reference query
     pub goto_reference_include_declaration: bool,
+    /// Display diagnostic on the same line they occur automatically.
+    /// Also called "error lens"-style diagnostics, in reference to the popular VSCode extension.
+    pub inline_diagnostics: InlineDiagnosticsConfig,
+    pub display_diagnostic_message: bool,
+    pub copilot_auto: bool,
 }
 
 impl Default for LspConfig {
@@ -428,6 +434,9 @@ impl Default for LspConfig {
             display_inlay_hints: false,
             snippets: true,
             goto_reference_include_declaration: true,
+            inline_diagnostics: InlineDiagnosticsConfig::default(),
+            display_diagnostic_message: true,
+            copilot_auto: true,
         }
     }
 }
@@ -2038,6 +2047,9 @@ impl Editor {
             doc.set_selection(view.id, selection);
             doc.restore_cursor = false;
         }
+        let mut copilot_state = doc.copilot_state.lock();
+        copilot_state.exited_insert_mode();
+        copilot_state.reset_state();
     }
 
     pub fn current_stack_frame(&self) -> Option<&StackFrame> {
@@ -2103,5 +2115,30 @@ fn try_restore_indent(doc: &mut Document, view: &mut View) {
                 (line_start_pos, pos, None)
             });
         doc.apply(&transaction, view.id);
+    }
+}
+
+#[derive(Default)]
+pub struct CursorCache(Cell<Option<Option<Position>>>);
+
+impl CursorCache {
+    pub fn get(&self, view: &View, doc: &Document) -> Option<Position> {
+        if let Some(pos) = self.0.get() {
+            return pos;
+        }
+
+        let text = doc.text().slice(..);
+        let cursor = doc.selection(view.id).primary().cursor(text);
+        let res = view.screen_coords_at_pos(doc, text, cursor);
+        self.set(res);
+        res
+    }
+
+    pub fn set(&self, cursor_pos: Option<Position>) {
+        self.0.set(Some(cursor_pos))
+    }
+
+    pub fn reset(&self) {
+        self.0.set(None)
     }
 }
