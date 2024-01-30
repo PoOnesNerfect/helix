@@ -52,8 +52,8 @@ use crate::{
     job::Callback,
     keymap::ReverseKeymap,
     ui::{
-        self, overlay::overlaid, picker::interactive::interactive_search, Picker, Popup, Prompt,
-        PromptEvent,
+        self, overlay::overlaid, picker::interactive::spawn_interactive_search, Picker, Popup,
+        Prompt, PromptEvent,
     },
 };
 
@@ -2150,6 +2150,10 @@ fn make_search_word_bounded(cx: &mut Context) {
 }
 
 fn global_search(cx: &mut Context) {
+    spawn_interactive_search(true, cx)
+}
+
+fn _global_search(cx: &mut Context) {
     #[derive(Debug)]
     struct FileResult {
         path: PathBuf,
@@ -2699,15 +2703,23 @@ fn append_mode(cx: &mut Context) {
     doc.set_selection(view.id, selection);
 }
 
-fn file_picker(cx: &mut Context) {
-    let root = find_workspace().0;
-    if !root.exists() {
-        cx.editor.set_error("Workspace directory does not exist");
-        return;
-    }
-    let picker = ui::file_picker(root, &cx.editor.config());
-    cx.push_layer(Box::new(overlaid(picker)));
+fn interactive_search(cx: &mut Context) {
+    spawn_interactive_search(true, cx)
 }
+
+fn file_picker(cx: &mut Context) {
+    spawn_interactive_search(false, cx)
+}
+
+// fn file_picker(cx: &mut Context) {
+//     let root = find_workspace().0;
+//     if !root.exists() {
+//         cx.editor.set_error("Workspace directory does not exist");
+//         return;
+//     }
+//     let picker = ui::file_picker(root, &cx.editor.config());
+//     cx.push_layer(Box::new(overlaid(picker)));
+// }
 
 fn file_picker_in_current_buffer_directory(cx: &mut Context) {
     let doc_dir = doc!(cx.editor)

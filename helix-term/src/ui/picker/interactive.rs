@@ -1,6 +1,6 @@
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{sinks, BinaryDetection, SearcherBuilder};
-use helix_core::{Position, RopeReader, Selection};
+use helix_core::{movement::Direction, Position, RopeReader, Selection};
 use helix_loader::find_workspace;
 use helix_view::{
     align_view,
@@ -24,6 +24,7 @@ use crate::{
     compositor::{Component, Context, EventResult},
     ctrl, filter_picker_entry,
     job::Callback,
+    key, shift,
     ui::{self, menu::Item, overlay::overlaid, Prompt},
 };
 
@@ -45,7 +46,11 @@ pub struct InteractivePicker<T: ui::menu::Item + Send + Sync> {
 }
 
 impl<T: ui::menu::Item + Send + Sync> InteractivePicker<T> {
-    pub fn new(mut file_picker: Picker<T>, search_query_callback: DynQueryCallback<T>) -> Self {
+    pub fn new(
+        mut file_picker: Picker<T>,
+        search_focused: bool,
+        search_query_callback: DynQueryCallback<T>,
+    ) -> Self {
         let search_prompt = Prompt::new(
             "search:".into(),
             None,
@@ -57,7 +62,7 @@ impl<T: ui::menu::Item + Send + Sync> InteractivePicker<T> {
 
         Self {
             file_picker,
-            search_focused: true,
+            search_focused,
             search_query_callback,
             search_prompt,
             previous_search: String::new(),
@@ -170,12 +175,20 @@ impl<T: Item + Send + Sync + 'static> Component for InteractivePicker<T> {
     fn handle_event(&mut self, event: &Event, cx: &mut Context) -> EventResult {
         if let Event::Key(key_event) = event {
             match key_event {
-                ctrl!('k') => {
-                    self.search_focused = true;
+                key!(Tab) | shift!(Tab) => {
+                    self.search_focused = !self.search_focused;
                     return EventResult::Consumed(None);
                 }
                 ctrl!('j') => {
-                    self.search_focused = false;
+                    // So that idle timeout retriggers
+                    cx.editor.reset_idle_timer();
+                    self.file_picker.move_by(1, Direction::Forward);
+                    return EventResult::Consumed(None);
+                }
+                ctrl!('k') => {
+                    // So that idle timeout retriggers
+                    cx.editor.reset_idle_timer();
+                    self.file_picker.move_by(1, Direction::Backward);
                     return EventResult::Consumed(None);
                 }
                 _ => {}
@@ -289,7 +302,7 @@ impl ui::menu::Item for FileResult {
     }
 }
 
-pub fn interactive_search(cx: &mut crate::commands::Context) {
+pub fn spawn_interactive_search(search_focused: bool, cx: &mut crate::commands::Context) {
     let config = cx.editor.config();
     let file_picker_config = &config.file_picker;
     let dedup_symlinks = file_picker_config.deduplicate_links;
@@ -388,7 +401,7 @@ pub fn interactive_search(cx: &mut crate::commands::Context) {
         });
     }
 
-    let interactive = InteractivePicker::new(picker, Box::new(dyn_search_callback));
+    let interactive = InteractivePicker::new(picker, search_focused, Box::new(dyn_search_callback));
 
     cx.push_layer(Box::new(overlaid(interactive)));
 }
