@@ -57,6 +57,7 @@ use crate::{
 
 use crate::job::{self, Jobs};
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     fmt,
     future::Future,
@@ -300,6 +301,8 @@ impl MappableCommand {
         extend_line, "Select current line, if already selected, extend to another line based on the anchor",
         extend_line_below, "Select current line, if already selected, extend to next line",
         extend_line_above, "Select current line, if already selected, extend to previous line",
+        select_line_above, "Select current line, if already selected, extend or shrink line above based on the anchor",
+        select_line_below, "Select current line, if already selected, extend or shrink line below based on the anchor",
         extend_to_line_bounds, "Extend selection to line bounds",
         shrink_to_line_bounds, "Shrink selection to line bounds",
         delete_selection, "Delete selection",
@@ -2437,7 +2440,6 @@ fn extend_line_below(cx: &mut Context) {
 fn extend_line_above(cx: &mut Context) {
     extend_line_impl(cx, Extend::Above);
 }
-
 fn extend_line_impl(cx: &mut Context, extend: Extend) {
     let count = cx.count();
     let (view, doc) = current!(cx.editor);
@@ -2471,6 +2473,59 @@ fn extend_line_impl(cx: &mut Context, extend: Extend) {
             }
         };
 
+        Range::new(anchor, head)
+    });
+
+    doc.set_selection(view.id, selection);
+}
+fn select_line_below(cx: &mut Context) {
+    select_line_impl(cx, Extend::Below);
+}
+fn select_line_above(cx: &mut Context) {
+    select_line_impl(cx, Extend::Above);
+}
+fn select_line_impl(cx: &mut Context, extend: Extend) {
+    let mut count = cx.count();
+    let (view, doc) = current!(cx.editor);
+    let text = doc.text();
+    let saturating_add = |a: usize, b: usize| (a + b).min(text.len_lines());
+    let selection = doc.selection(view.id).clone().transform(|range| {
+        let (start_line, end_line) = range.line_range(text.slice(..));
+        let start = text.line_to_char(start_line);
+        let end = text.line_to_char(saturating_add(end_line, 1));
+        let direction = range.direction();
+
+        // Extending to line bounds is counted as one step
+        if range.from() != start || range.to() != end {
+            count = count.saturating_sub(1)
+        }
+        let (anchor_line, head_line) = match (&extend, direction) {
+            (Extend::Above, Direction::Forward) => (start_line, end_line.saturating_sub(count)),
+            (Extend::Above, Direction::Backward) => (end_line, start_line.saturating_sub(count)),
+            (Extend::Below, Direction::Forward) => (start_line, saturating_add(end_line, count)),
+            (Extend::Below, Direction::Backward) => (end_line, saturating_add(start_line, count)),
+        };
+        let (anchor, head) = match anchor_line.cmp(&head_line) {
+            Ordering::Less => (
+                text.line_to_char(anchor_line),
+                text.line_to_char(saturating_add(head_line, 1)),
+            ),
+            Ordering::Equal => match extend {
+                Extend::Above => (
+                    text.line_to_char(saturating_add(anchor_line, 1)),
+                    text.line_to_char(head_line),
+                ),
+                Extend::Below => (
+                    text.line_to_char(head_line),
+                    text.line_to_char(saturating_add(anchor_line, 1)),
+                ),
+            },
+
+            Ordering::Greater => (
+                text.line_to_char(saturating_add(anchor_line, 1)),
+                text.line_to_char(head_line),
+            ),
+        };
         Range::new(anchor, head)
     });
 
@@ -5426,16 +5481,9 @@ fn shell_keep_pipe(cx: &mut Context) {
 
             for (i, range) in selection.ranges().iter().enumerate() {
                 let fragment = range.slice(text);
-                let (_output, success) = match shell_impl(shell, input, Some(fragment.into())) {
-                    Ok(result) => result,
-                    Err(err) => {
-                        cx.editor.set_error(err.to_string());
-                        return;
-                    }
-                };
-
-                // if the process exits successfully, keep the selection
-                if success {
+                if let Err(err) = shell_impl(shell, input, Some(fragment.into())) {
+                    log::debug!("Shell command failed: {}", err);
+                } else {
                     ranges.push(*range);
                     if i >= old_index && index.is_none() {
                         index = Some(ranges.len() - 1);
@@ -5454,7 +5502,7 @@ fn shell_keep_pipe(cx: &mut Context) {
     );
 }
 
-fn shell_impl(shell: &[String], cmd: &str, input: Option<Rope>) -> anyhow::Result<(Tendril, bool)> {
+fn shell_impl(shell: &[String], cmd: &str, input: Option<Rope>) -> anyhow::Result<Tendril> {
     tokio::task::block_in_place(|| helix_lsp::block_on(shell_impl_async(shell, cmd, input)))
 }
 
@@ -5462,7 +5510,7 @@ async fn shell_impl_async(
     shell: &[String],
     cmd: &str,
     input: Option<Rope>,
-) -> anyhow::Result<(Tendril, bool)> {
+) -> anyhow::Result<Tendril> {
     use std::process::Stdio;
     use tokio::process::Command;
     ensure!(!shell.is_empty(), "No shell set");
@@ -5525,7 +5573,7 @@ async fn shell_impl_async(
     let str = std::str::from_utf8(&output.stdout)
         .map_err(|_| anyhow!("Process did not output valid UTF-8"))?;
     let tendril = Tendril::from(str);
-    Ok((tendril, output.status.success()))
+    Ok(tendril)
 }
 
 fn shell(cx: &mut compositor::Context, cmd: &str, behavior: &ShellBehavior) {
@@ -5546,14 +5594,14 @@ fn shell(cx: &mut compositor::Context, cmd: &str, behavior: &ShellBehavior) {
     let mut shell_output: Option<Tendril> = None;
     let mut offset = 0isize;
     for range in selection.ranges() {
-        let (output, success) = if let Some(output) = shell_output.as_ref() {
-            (output.clone(), true)
+        let output = if let Some(output) = shell_output.as_ref() {
+            output.clone()
         } else {
             let fragment = range.slice(text);
             match shell_impl(shell, cmd, pipe.then(|| fragment.into())) {
                 Ok(result) => {
                     if !pipe {
-                        shell_output = Some(result.0.clone());
+                        shell_output = Some(result.clone());
                     }
                     result
                 }
@@ -5563,11 +5611,6 @@ fn shell(cx: &mut compositor::Context, cmd: &str, behavior: &ShellBehavior) {
                 }
             }
         };
-
-        if !success {
-            cx.editor.set_error("Command failed");
-            return;
-        }
 
         let output_len = output.chars().count();
 
