@@ -522,6 +522,9 @@ pub enum StatusLineElement {
     /// The relative file path
     FileName,
 
+    /// The file absolute path
+    FileAbsolutePath,
+
     // The file modification indicator
     FileModificationIndicator,
 
