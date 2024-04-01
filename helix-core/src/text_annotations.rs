@@ -1,11 +1,11 @@
+use crate::doc_formatter::{FormattedGrapheme, TextFormat};
+use crate::syntax::Highlight;
+use crate::{softwrapped_dimensions, Tendril};
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::ops::Range;
 use std::ptr::NonNull;
-use crate::doc_formatter::{FormattedGrapheme, TextFormat};
-use crate::syntax::Highlight;
-use crate::{softwrapped_dimensions, Tendril};
 
 /// An inline annotation is continuous text shown
 /// on the screen before the grapheme that starts at
@@ -332,7 +332,9 @@ impl<'a> TextAnnotations<'a> {
         layer: &'a [InlineAnnotation],
         highlight: Option<Highlight>,
     ) -> &mut Self {
-        self.inline_annotations.push((layer, highlight).into());
+        if !layer.is_empty() {
+            self.inline_annotations.push((layer, highlight).into());
+        }
         self
     }
 
@@ -347,7 +349,9 @@ impl<'a> TextAnnotations<'a> {
     /// If multiple layers contain overlay at the same position
     /// the overlay from the layer added last will be show.
     pub fn add_overlay(&mut self, layer: &'a [Overlay], highlight: Option<Highlight>) -> &mut Self {
-        self.overlays.push((layer, highlight).into());
+        if !layer.is_empty() {
+            self.overlays.push((layer, highlight).into());
+        }
         self
     }
 
