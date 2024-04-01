@@ -1,11 +1,11 @@
+use crate::doc_formatter::{FormattedGrapheme, TextFormat};
+use crate::syntax::Highlight;
+use crate::{softwrapped_dimensions, Tendril};
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::ops::Range;
 use std::ptr::NonNull;
-use crate::doc_formatter::{FormattedGrapheme, TextFormat};
-use crate::syntax::Highlight;
-use crate::{softwrapped_dimensions, Tendril};
 
 /// An inline annotation is continuous text shown
 /// on the screen before the grapheme that starts at
@@ -272,11 +272,20 @@ impl<T: ?Sized> Drop for RawBox<T> {
 
 /// Annotations that change that is displayed when the document is render.
 /// Also commonly called virtual text.
-#[derive(Default, Debug, Clone)]
+#[derive(Default)]
 pub struct TextAnnotations<'a> {
     inline_annotations: Vec<Layer<'a, InlineAnnotation, Option<Highlight>>>,
     overlays: Vec<Layer<'a, Overlay, Option<Highlight>>>,
-    line_annotations: Vec<Layer<'a, LineAnnotation, ()>>,
+    line_annotations: Vec<(Cell<usize>, RawBox<dyn LineAnnotation + 'a>)>,
+}
+
+impl Debug for TextAnnotations<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TextAnnotations")
+            .field("inline_annotations", &self.inline_annotations)
+            .field("overlays", &self.overlays)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> TextAnnotations<'a> {
@@ -323,7 +332,9 @@ impl<'a> TextAnnotations<'a> {
         layer: &'a [InlineAnnotation],
         highlight: Option<Highlight>,
     ) -> &mut Self {
-        self.inline_annotations.push((layer, highlight).into());
+        if !layer.is_empty() {
+            self.inline_annotations.push((layer, highlight).into());
+        }
         self
     }
 
@@ -338,7 +349,9 @@ impl<'a> TextAnnotations<'a> {
     /// If multiple layers contain overlay at the same position
     /// the overlay from the layer added last will be show.
     pub fn add_overlay(&mut self, layer: &'a [Overlay], highlight: Option<Highlight>) -> &mut Self {
-        self.overlays.push((layer, highlight).into());
+        if !layer.is_empty() {
+            self.overlays.push((layer, highlight).into());
+        }
         self
     }
 
@@ -346,8 +359,9 @@ impl<'a> TextAnnotations<'a> {
     ///
     /// The line annotations **must be sorted** by their `char_idx`.
     /// Multiple line annotations with the same `char_idx` **are not allowed**.
-    pub fn add_line_annotation(&mut self, layer: &'a [LineAnnotation]) -> &mut Self {
-        self.line_annotations.push((layer, ()).into());
+    pub fn add_line_annotation(&mut self, layer: Box<dyn LineAnnotation + 'a>) -> &mut Self {
+        self.line_annotations
+            .push((Cell::new(usize::MAX), layer.into()));
         self
     }
 
