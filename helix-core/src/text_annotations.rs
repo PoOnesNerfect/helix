@@ -272,20 +272,11 @@ impl<T: ?Sized> Drop for RawBox<T> {
 
 /// Annotations that change that is displayed when the document is render.
 /// Also commonly called virtual text.
-#[derive(Default)]
+#[derive(Default, Debug, Clone)]
 pub struct TextAnnotations<'a> {
     inline_annotations: Vec<Layer<'a, InlineAnnotation, Option<Highlight>>>,
     overlays: Vec<Layer<'a, Overlay, Option<Highlight>>>,
-    line_annotations: Vec<(Cell<usize>, RawBox<dyn LineAnnotation + 'a>)>,
-}
-
-impl Debug for TextAnnotations<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TextAnnotations")
-            .field("inline_annotations", &self.inline_annotations)
-            .field("overlays", &self.overlays)
-            .finish_non_exhaustive()
-    }
+    line_annotations: Vec<Layer<'a, LineAnnotation, ()>>,
 }
 
 impl<'a> TextAnnotations<'a> {
@@ -355,9 +346,8 @@ impl<'a> TextAnnotations<'a> {
     ///
     /// The line annotations **must be sorted** by their `char_idx`.
     /// Multiple line annotations with the same `char_idx` **are not allowed**.
-    pub fn add_line_annotation(&mut self, layer: Box<dyn LineAnnotation + 'a>) -> &mut Self {
-        self.line_annotations
-            .push((Cell::new(usize::MAX), layer.into()));
+    pub fn add_line_annotation(&mut self, layer: &'a [LineAnnotation]) -> &mut Self {
+        self.line_annotations.push((layer, ()).into());
         self
     }
 
