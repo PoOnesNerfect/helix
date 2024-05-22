@@ -14,7 +14,7 @@ mod statusline;
 mod text;
 mod text_decorations;
 
-use crate::compositor::{Component, Compositor};
+use crate::compositor::Compositor;
 use crate::filter_picker_entry;
 use crate::job::{self, Callback};
 pub use completion::{Completion, CompletionItem};
@@ -144,14 +144,12 @@ pub fn raw_regex_prompt(
                                         move |_editor: &mut Editor, compositor: &mut Compositor| {
                                             let contents = Text::new(format!("{}", err));
                                             let size = compositor.size();
-                                            let mut popup = Popup::new("invalid-regex", contents)
+                                            let popup = Popup::new("invalid-regex", contents)
                                                 .position(Some(helix_core::Position::new(
                                                     size.height as usize - 2, // 2 = statusline + commandline
                                                     0,
                                                 )))
                                                 .auto_close(true);
-                                            popup.required_size((size.width, size.height));
-
                                             compositor.replace_or_push("invalid-regex", popup);
                                         },
                                     ));
