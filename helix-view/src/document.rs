@@ -743,7 +743,7 @@ where
     *mut_ref = f(mem::take(mut_ref));
 }
 
-use helix_lsp::{lsp, copilot_types, Client, LanguageServerId, LanguageServerName};
+use helix_lsp::{copilot_types, Client, LanguageServerId, LanguageServerName};
 use url::Url;
 
 impl Document {

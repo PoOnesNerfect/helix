@@ -17,11 +17,11 @@ use tui::buffer::Buffer as Surface;
 
 use crate::ui::text_decorations::DecorationManager;
 
-impl<F: FnMut(&mut TextRenderer, LinePos)> LineDecoration for F {
-    fn render_background(&mut self, renderer: &mut TextRenderer, pos: LinePos) {
-        self(renderer, pos)
-    }
-}
+// impl<F: FnMut(&mut TextRenderer, LinePos)> LineDecoration for F {
+//     fn render_background(&mut self, renderer: &mut TextRenderer, pos: LinePos) {
+//         self(renderer, pos)
+//     }
+// }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum StyleIterKind {
@@ -174,7 +174,9 @@ pub fn render_text<'t>(
     let mut reached_view_top = false;
 
     loop {
-        let Some(mut grapheme) = formatter.next() else { break };
+        let Some(mut grapheme) = formatter.next() else {
+            break;
+        };
 
         // skip any graphemes on visual lines before the block start
         if grapheme.visual_pos.row < row_off {

@@ -1,4 +1,6 @@
 //! LSP diagnostic utility types.
+use std::fmt;
+
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
