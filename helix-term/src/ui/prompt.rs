@@ -7,7 +7,7 @@ use helix_view::keyboard::KeyCode;
 use std::sync::Arc;
 use std::{borrow::Cow, ops::RangeFrom};
 use tui::buffer::Buffer as Surface;
-use tui::widgets::{Block, Borders, Widget};
+use tui::widgets::{Block, Widget};
 
 use helix_core::{
     unicode::segmentation::GraphemeCursor, unicode::width::UnicodeWidthStr, Position,
@@ -460,12 +460,11 @@ impl Prompt {
             let background = theme.get("ui.help");
             surface.clear_with(area, background);
 
-            let block = Block::default()
+            let block = Block::bordered()
                 // .title(self.title.as_str())
-                .borders(Borders::ALL)
                 .border_style(background);
 
-            let inner = block.inner(area).inner(&Margin::horizontal(1));
+            let inner = block.inner(area).inner(Margin::horizontal(1));
 
             block.render(area, surface);
             text.render(inner, surface, cx);
@@ -547,10 +546,6 @@ impl Component for Prompt {
                 (self.callback_fn)(cx, &self.line, PromptEvent::Update);
             }
             ctrl!('h') | key!(Backspace) | shift!(Backspace) => {
-                if self.line.is_empty() {
-                    (self.callback_fn)(cx, &self.line, PromptEvent::Abort);
-                    return close_fn;
-                }
                 self.delete_char_backwards(cx.editor);
                 (self.callback_fn)(cx, &self.line, PromptEvent::Update);
             }
