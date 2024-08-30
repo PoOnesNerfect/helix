@@ -1,8 +1,7 @@
 //! LSP diagnostic utility types.
 use std::fmt;
 
-use serde::de::Error;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 /// Describes the severity level of a [`Diagnostic`].
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -14,39 +13,6 @@ pub enum Severity {
     Error,
 }
 
-impl Serialize for Severity {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(match *self {
-            Severity::Hint => "hint",
-            Severity::Info => "info",
-            Severity::Warning => "warning",
-            Severity::Error => "error",
-        })
-    }
-}
-
-impl<'de> Deserialize<'de> for Severity {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let res = match String::deserialize(deserializer)?.as_str() {
-            "hint" => Severity::Hint,
-            "info" => Severity::Info,
-            "warning" => Severity::Warning,
-            "error" => Severity::Error,
-            _ => {
-                return Err(D::Error::custom(
-                    "expected \"hint\", \"info\", \"warning\" or \"error\"",
-                ))
-            }
-        };
-        Ok(res)
-    }
-}
 impl Default for Severity {
     fn default() -> Self {
         Self::Hint
@@ -116,12 +82,5 @@ slotmap::new_key_type! {
 impl fmt::Display for LanguageServerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self.0)
-    }
-}
-
-impl Diagnostic {
-    #[inline]
-    pub fn severity(&self) -> Severity {
-        self.severity.unwrap_or(Severity::Warning)
     }
 }

@@ -1,15 +1,11 @@
 use crate::doc_formatter::{FormattedGrapheme, TextFormat};
 use crate::syntax::Highlight;
-use crate::{softwrapped_dimensions, Tendril};
+use crate::{softwrapped_dimensions, Position, Tendril};
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::ops::Range;
 use std::ptr::NonNull;
-
-use crate::doc_formatter::FormattedGrapheme;
-use crate::syntax::Highlight;
-use crate::{Position, Tendril};
 
 /// An inline annotation is continuous text shown
 /// on the screen before the grapheme that starts at
@@ -449,14 +445,17 @@ impl LineAnnotation for CopilotLineAnnotation {
     fn insert_virtual_lines(
         &mut self,
         _line_end_char_idx: usize,
-        _vertical_off: usize,
+        _vertical_off: Position,
         _doc_line: usize,
-    ) -> usize {
+    ) -> Position {
         if self.row != _doc_line {
-            return 0;
+            return (0, 0).into();
         }
         let mut text_fmt = TextFormat::default();
         text_fmt.viewport_width = self.view_width;
-        return softwrapped_dimensions(self.text.as_str().into(), &text_fmt).0 - 1;
+
+        let diagostic_height: usize =
+            softwrapped_dimensions(self.text.as_str().into(), &text_fmt).0 - 1;
+        Position::new(diagostic_height, 0)
     }
 }

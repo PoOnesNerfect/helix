@@ -1,4 +1,4 @@
-use lsp_types::{request::Request, Position, Range};
+use helix_lsp_types::{request::Request, Position, Range};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
