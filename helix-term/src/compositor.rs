@@ -69,10 +69,13 @@ impl<'a> Context<'a> {
         Editor::new(
             Rect::new(0, 0, 60, 120),
             Arc::new(theme::Loader::new(&[])),
-            Arc::new(syntax::Loader::new(Configuration {
-                language: vec![],
-                language_server: HashMap::new(),
-            })),
+            Arc::new(ArcSwap::from_pointee(
+                syntax::Loader::new(Configuration {
+                    language: vec![],
+                    language_server: HashMap::new(),
+                })
+                .unwrap(),
+            )),
             Arc::new(Arc::new(Map::new(
                 Arc::clone(&config),
                 |config: &Config| &config.editor,

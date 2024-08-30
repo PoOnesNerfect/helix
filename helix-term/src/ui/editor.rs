@@ -5,10 +5,10 @@ use crate::{
     key,
     keymap::{KeymapResult, Keymaps},
     ui::{
-        document::{render_document, LinePos, TextRenderer, TranslatedPosition},
+        document::{render_document, LinePos, TextRenderer},
         statusline,
         text_decorations::{self, Decoration, DecorationManager, InlineDiagnostics},
-        Completion, CompletionItem, ProgressSpinners, Explorer
+        Completion, CompletionItem, Explorer, ProgressSpinners,
     },
 };
 
