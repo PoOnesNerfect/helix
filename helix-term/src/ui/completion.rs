@@ -448,9 +448,11 @@ impl Component for Completion {
         // ---
         // option.documentation
 
-        let Some(coords) = cx.editor.cursor().0 else { return };
+        let Some(coords) = cx.editor.cursor().0 else {
+            return;
+        };
         let cursor_pos = coords.row as u16;
-        let (_, doc) = current!(cx.editor);
+        let doc = doc!(cx.editor);
         let language = doc.language_name().unwrap_or("");
 
         let markdowned = |lang: &str, detail: Option<&str>, doc: Option<&str>| {

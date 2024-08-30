@@ -304,10 +304,10 @@ impl<'t> DocumentFormatter<'t> {
             0
         };
 
-        self.visual_pos.col = indent_carry_over as usize;
         let virtual_lines =
             self.annotations
-                .virtual_lines_at(self.char_pos, self.visual_pos.row, self.line_pos);
+                .virtual_lines_at(self.char_pos, self.visual_pos, self.line_pos);
+        self.visual_pos.col = indent_carry_over as usize;
         self.visual_pos.row += 1 + virtual_lines;
         let mut i = 0;
         let mut word_width = 0;
@@ -368,30 +368,21 @@ impl<'t> DocumentFormatter<'t> {
             let mut col = self.visual_pos.col + word_width;
             let char_pos = self.char_pos + word_chars;
             match col.cmp(&(self.text_fmt.viewport_width as usize)) {
+                // The EOF char and newline chars are always selectable in helix. That means
+                // that wrapping happens "too-early" if a word fits a line perfectly. This
+                // is intentional so that all selectable graphemes are always visisble (and
+                // therefore the cursor never dissapears). However if the user manually set a
+                // lower softwrap width then this is undesirable. Just increasing the viewport-
+                // width by one doesn't work because if a line is wrapped multiple times then
+                // some words may extend past the specified width.
+                //
+                // So we special case a word that ends exactly at line bounds and is followed
+                // by a newline/eof character here.
                 Ordering::Equal
                     if self.text_fmt.soft_wrap_at_text_width
                         && self.peek_grapheme(col, char_pos).map_or(false, |grapheme| {
                             grapheme.is_newline() || grapheme.is_eof()
-                        }) =>
-                {
-                    // The EOF char and newline chars are always selectable in helix.
-                    // That means that wrapping happens "too-early" if a word fits a line
-                    // perfectly. This is intentional so that all selectable graphemes are always
-                    // visisble (and therefore the cursor never dissapears). However if the user
-                    // manually set a lower softwrap width then this is underisable.
-                    // Just increasing the viewport-width by one doesn't work because if a line
-                    // is wrapped multiple times then some words may extend past the specified width.
-                    //
-                    // Instead for newline chars/EOF we simply only
-
-                    // if the word fits the screen width perfectly then we don't need to do anything
-                    // because trailing whitespaces are attechted to a word this can
-                    // * The word ends the EOF
-                    // *
-                    // if we allow line breaks to extend one past the end of the screen
-                    // (because we are using a manually configured text_width) or we are at the end of the file
-                    // then the word fits perfectly to the width and we don't need to wrap (or do anything)
-                }
+                        }) => {}
                 Ordering::Equal if word_width > self.text_fmt.max_wrap as usize => return,
                 Ordering::Greater if word_width > self.text_fmt.max_wrap as usize => {
                     self.peeked_grapheme = self.word_buf.pop();
@@ -404,8 +395,8 @@ impl<'t> DocumentFormatter<'t> {
                 Ordering::Less => (),
             }
 
-            let Some(grapheme) = self.next_grapheme(col, char_pos) else{
-                return
+            let Some(grapheme) = self.next_grapheme(col, char_pos) else {
+                return;
             };
             word_chars += grapheme.doc_chars();
 
@@ -468,11 +459,11 @@ impl<'t> Iterator for DocumentFormatter<'t> {
             self.annotations.process_virtual_text_anchors(&grapheme);
         }
         if grapheme.raw == Grapheme::Newline {
-            let virtual_lines = self.annotations.virtual_lines_at(
-                self.char_pos,
-                self.visual_pos.row,
-                self.line_pos,
-            );
+            // move to end of newline char
+            self.visual_pos.col += 1;
+            let virtual_lines =
+                self.annotations
+                    .virtual_lines_at(self.char_pos, self.visual_pos, self.line_pos);
             self.visual_pos.row += 1 + virtual_lines;
             self.visual_pos.col = 0;
             if !grapheme.is_virtual() {

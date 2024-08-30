@@ -6,8 +6,9 @@ use crate::{
     keymap::{KeymapResult, Keymaps},
     ui::{
         document::{render_document, LinePos, TextRenderer},
+        statusline,
         text_decorations::{self, Decoration, DecorationManager, InlineDiagnostics},
-        Completion, ProgressSpinners,
+        Completion, CompletionItem, ProgressSpinners,
     },
 };
 
@@ -21,6 +22,7 @@ use helix_core::{
     visual_offset_from_block, Change, Position, Range, Selection, Transaction,
 };
 use helix_view::{
+    annotations::diagnostics::DiagnosticFilter,
     document::{Mode, SavePoint, SCRATCH_BUFFER_NAME},
     editor::{CompleteAction, CursorShapeConfig},
     graphics::{Color, CursorKind, Modifier, Rect, Style},
@@ -31,9 +33,6 @@ use helix_view::{
 use std::{mem::take, num::NonZeroUsize, path::PathBuf, rc::Rc, sync::Arc};
 
 use tui::{buffer::Buffer as Surface, text::Span};
-
-use super::{completion::CompletionItem, statusline};
-use super::{lsp::SignatureHelp, text_decorations::CopilotDecoration};
 
 pub struct EditorView {
     pub keymaps: Keymaps,
@@ -94,6 +93,8 @@ impl EditorView {
         let theme = &editor.theme;
         let config = editor.config();
 
+        let view_offset = doc.view_offset(view.id);
+
         let text_annotations = view.text_annotations(doc, Some(theme));
         let mut decorations = DecorationManager::default();
 
@@ -113,23 +114,20 @@ impl EditorView {
                 if pos.doc_line != dap_line {
                     return;
                 }
-                renderer.surface.set_style(
-                    Rect::new(inner.x, inner.y + pos.visual_line, inner.width, 1),
-                    style,
-                );
+                renderer.set_style(Rect::new(inner.x, pos.visual_line, inner.width, 1), style);
             };
 
             decorations.add_decoration(line_decoration);
         }
 
         let syntax_highlights =
-            Self::doc_syntax_highlights(doc, view.offset.anchor, inner.height, theme);
+            Self::doc_syntax_highlights(doc, view_offset.anchor, inner.height, theme);
 
         let mut overlay_highlights =
-            Self::empty_highlight_iter(doc, view.offset.anchor, inner.height);
+            Self::empty_highlight_iter(doc, view_offset.anchor, inner.height);
         let overlay_syntax_highlights = Self::overlay_syntax_highlights(
             doc,
-            view.offset.anchor,
+            view_offset.anchor,
             inner.height,
             &text_annotations,
         );
@@ -175,7 +173,7 @@ impl EditorView {
                 view,
                 view.area,
                 theme,
-                is_focused,
+                is_focused & self.terminal_focused,
                 &mut decorations,
             );
         }
@@ -184,44 +182,30 @@ impl EditorView {
             .selection(view.id)
             .primary()
             .cursor(doc.text().slice(..));
-
         if is_focused {
-            let cursor = doc
-                .selection(view.id)
-                .primary()
-                .cursor(doc.text().slice(..));
-            // set the cursor_cache to out of view in case the position is not found
-            editor.cursor_cache.set(Some(None));
-
             decorations.add_decoration(text_decorations::Cursor {
                 cache: &editor.cursor_cache,
                 primary_cursor,
             });
         }
-        if config.lsp.inline_diagnostics.enable(inner.width) {
-            decorations.add_decoration(InlineDiagnostics::new(
-                doc.diagnostics(),
-                theme,
-                primary_cursor,
-                config.lsp.inline_diagnostics.clone(),
-            ));
-        };
-
-        if let Some((text, pos)) = doc.copilot_state.lock().get_completion_text_and_pos() {
-            decorations.add_decoration(CopilotDecoration::new(
-                theme.get("ui.text.focused"),
-                doc.text().slice(..),
-                text.to_string(),
-                pos,
-                inner.width,
-            ));
-        }
-
+        let width = view.inner_width(doc);
+        let config = doc.config.load();
+        let enable_cursor_line = view
+            .diagnostics_handler
+            .show_cursorline_diagnostics(doc, view.id);
+        let inline_diagnostic_config = config.inline_diagnostics.prepare(width, enable_cursor_line);
+        decorations.add_decoration(InlineDiagnostics::new(
+            doc,
+            theme,
+            primary_cursor,
+            inline_diagnostic_config,
+            config.end_of_line_diagnostics,
+        ));
         render_document(
             surface,
             inner,
             doc,
-            view.offset,
+            view_offset,
             &text_annotations,
             syntax_highlights,
             overlay_highlights,
@@ -242,7 +226,9 @@ impl EditorView {
             }
         }
 
-        if config.lsp.display_diagnostic_message {
+        if config.inline_diagnostics.disabled()
+            && config.end_of_line_diagnostics == DiagnosticFilter::Disable
+        {
             Self::render_diagnostics(doc, view, inner, surface, theme);
         }
 
@@ -275,11 +261,13 @@ impl EditorView {
             .and_then(|config| config.rulers.as_ref())
             .unwrap_or(editor_rulers);
 
+        let view_offset = doc.view_offset(view.id);
+
         rulers
             .iter()
             // View might be horizontally scrolled, convert from absolute distance
             // from the 1st column to relative distance from left of viewport
-            .filter_map(|ruler| ruler.checked_sub(1 + view.offset.horizontal_offset as u16))
+            .filter_map(|ruler| ruler.checked_sub(1 + view_offset.horizontal_offset as u16))
             .filter(|ruler| ruler < &viewport.width)
             .map(|ruler| viewport.clip_left(ruler).with_width(1))
             .for_each(|area| surface.set_style(area, ruler_theme))
@@ -689,7 +677,7 @@ impl EditorView {
                 // TODO handle softwrap in gutters
                 let selected = cursors.contains(&pos.doc_line);
                 let x = viewport.x + offset;
-                let y = viewport.y + pos.visual_line;
+                let y = pos.visual_line;
 
                 let gutter_style = match (selected, pos.first_visual_line) {
                     (false, true) => gutter_style,
@@ -701,11 +689,9 @@ impl EditorView {
                 if let Some(style) =
                     gutter(pos.doc_line, selected, pos.first_visual_line, &mut text)
                 {
-                    renderer
-                        .surface
-                        .set_stringn(x, y, &text, width, gutter_style.patch(style));
+                    renderer.set_stringn(x, y, &text, width, gutter_style.patch(style));
                 } else {
-                    renderer.surface.set_style(
+                    renderer.set_style(
                         Rect {
                             x,
                             y,
@@ -809,11 +795,11 @@ impl EditorView {
         let viewport = view.area;
 
         move |renderer: &mut TextRenderer, pos: LinePos| {
-            let area = Rect::new(viewport.x, viewport.y + pos.visual_line, viewport.width, 1);
+            let area = Rect::new(viewport.x, pos.visual_line, viewport.width, 1);
             if primary_line == pos.doc_line {
-                renderer.surface.set_style(area, primary_style);
+                renderer.set_style(area, primary_style);
             } else if secondary_lines.binary_search(&pos.doc_line).is_ok() {
-                renderer.surface.set_style(area, secondary_style);
+                renderer.set_style(area, secondary_style);
             }
         }
     }
@@ -843,6 +829,7 @@ impl EditorView {
         let inner_area = view.inner_area(doc);
 
         let selection = doc.selection(view.id);
+        let view_offset = doc.view_offset(view.id);
         let primary = selection.primary();
         let text_format = doc.text_format(viewport.width, None);
         for range in selection.iter() {
@@ -853,11 +840,11 @@ impl EditorView {
                 visual_offset_from_block(text, cursor, cursor, &text_format, text_annotations).0;
 
             // if the cursor is horizontally in the view
-            if col >= view.offset.horizontal_offset
-                && inner_area.width > (col - view.offset.horizontal_offset) as u16
+            if col >= view_offset.horizontal_offset
+                && inner_area.width > (col - view_offset.horizontal_offset) as u16
             {
                 let area = Rect::new(
-                    inner_area.x + (col - view.offset.horizontal_offset) as u16,
+                    inner_area.x + (col - view_offset.horizontal_offset) as u16,
                     view.area.y,
                     1,
                     view.area.height,
@@ -958,7 +945,11 @@ impl EditorView {
             // If the count is already started and the input is a number, always continue the count.
             (key!(i @ '0'..='9'), Some(count)) => {
                 let i = i.to_digit(10).unwrap() as usize;
-                cxt.editor.count = NonZeroUsize::new(count.get() * 10 + i);
+                let count = count.get() * 10 + i;
+                if count > 100_000_000 {
+                    return;
+                }
+                cxt.editor.count = NonZeroUsize::new(count);
             }
             // A non-zero digit will start the count if that number isn't used by a keymap.
             (key!(i @ '1'..='9'), None) if !self.keymaps.contains_key(mode, event) => {
@@ -1471,7 +1462,7 @@ impl Component for EditorView {
                 EventResult::Consumed(None)
             }
             Event::FocusLost => {
-                if context.editor.config().auto_save {
+                if context.editor.config().auto_save.focus_lost {
                     if let Err(e) = commands::typed::write_all_impl(context, false, false) {
                         context.editor.set_error(format!("{}", e));
                     }

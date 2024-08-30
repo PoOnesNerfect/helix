@@ -4,11 +4,13 @@ use helix_core::diagnostic::Severity;
 use helix_core::doc_formatter::{DocumentFormatter, FormattedGrapheme};
 use helix_core::graphemes::Grapheme;
 use helix_core::text_annotations::TextAnnotations;
-use helix_core::Diagnostic;
-use helix_view::annotations::diagnostics::{InlineDiagnosticAccumulator, InlineDiagnosticsConfig};
+use helix_core::{Diagnostic, Position};
+use helix_view::annotations::diagnostics::{
+    DiagnosticFilter, InlineDiagnosticAccumulator, InlineDiagnosticsConfig,
+};
 
 use helix_view::theme::Style;
-use helix_view::Theme;
+use helix_view::{Document, Theme};
 
 use crate::ui::document::{LinePos, TextRenderer};
 use crate::ui::text_decorations::Decoration;
@@ -43,19 +45,22 @@ impl Styles {
 
 pub struct InlineDiagnostics<'a> {
     state: InlineDiagnosticAccumulator<'a>,
+    eol_diagnostics: DiagnosticFilter,
     styles: Styles,
 }
 
 impl<'a> InlineDiagnostics<'a> {
     pub fn new(
-        diagnostics: &'a [Diagnostic],
+        doc: &'a Document,
         theme: &Theme,
         cursor: usize,
         config: InlineDiagnosticsConfig,
+        eol_diagnostics: DiagnosticFilter,
     ) -> Self {
         InlineDiagnostics {
-            state: InlineDiagnosticAccumulator::new(cursor, diagnostics, config),
+            state: InlineDiagnosticAccumulator::new(cursor, doc, config),
             styles: Styles::new(theme),
+            eol_diagnostics,
         }
     }
 }
@@ -88,6 +93,25 @@ impl Renderer<'_, '_> {
             row,
             col,
         );
+    }
+
+    fn draw_eol_diagnostic(&mut self, diag: &Diagnostic, row: u16, col: usize) -> u16 {
+        let style = self.styles.severity_style(diag.severity());
+        let width = self.renderer.viewport.width;
+        if !self.renderer.column_in_bounds(col + 1) {
+            return 0;
+        }
+        let col = (col - self.renderer.offset.col) as u16;
+        let (new_col, _) = self.renderer.set_string_truncated(
+            self.renderer.viewport.x + col + 1,
+            row,
+            &diag.message,
+            width.saturating_sub(col + 1) as usize,
+            |_| style,
+            true,
+            false,
+        );
+        new_col - col
     }
 
     fn draw_diagnostic(&mut self, diag: &Diagnostic, col: u16, next_severity: Option<Severity>) {
@@ -136,7 +160,9 @@ impl Renderer<'_, '_> {
     }
 
     fn draw_multi_diagnostics(&mut self, stack: &mut Vec<(&Diagnostic, u16)>) {
-        let Some(&(last_diag, last_anchor)) = stack.last() else { return };
+        let Some(&(last_diag, last_anchor)) = stack.last() else {
+            return;
+        };
         let start = self
             .config
             .max_diagnostic_start(self.renderer.viewport.width);
@@ -213,19 +239,51 @@ impl Decoration for InlineDiagnostics<'_> {
         &mut self,
         renderer: &mut TextRenderer,
         pos: LinePos,
-        virt_off: u16,
-    ) -> u16 {
+        virt_off: Position,
+    ) -> Position {
+        let mut col_off = 0;
+        let filter = self.state.filter();
+        let eol_diagnostic = match self.eol_diagnostics {
+            DiagnosticFilter::Enable(eol_filter) => {
+                let eol_diganogistcs = self
+                    .state
+                    .stack
+                    .iter()
+                    .filter(|(diag, _)| eol_filter <= diag.severity());
+                match filter {
+                    DiagnosticFilter::Enable(filter) => eol_diganogistcs
+                        .filter(|(diag, _)| filter > diag.severity())
+                        .max_by_key(|(diagnostic, _)| diagnostic.severity),
+                    DiagnosticFilter::Disable => {
+                        eol_diganogistcs.max_by_key(|(diagnostic, _)| diagnostic.severity)
+                    }
+                }
+            }
+            DiagnosticFilter::Disable => None,
+        };
+        if let Some((eol_diagnostic, _)) = eol_diagnostic {
+            let mut renderer = Renderer {
+                renderer,
+                first_row: pos.visual_line,
+                row: pos.visual_line,
+                config: &self.state.config,
+                styles: &self.styles,
+            };
+            col_off = renderer.draw_eol_diagnostic(eol_diagnostic, pos.visual_line, virt_off.col);
+        }
+
         self.state.compute_line_diagnostics();
         let mut renderer = Renderer {
             renderer,
-            first_row: pos.visual_line + virt_off,
-            row: pos.visual_line + virt_off,
+            first_row: pos.visual_line + virt_off.row as u16,
+            row: pos.visual_line + virt_off.row as u16,
             config: &self.state.config,
             styles: &self.styles,
         };
         renderer.draw_multi_diagnostics(&mut self.state.stack);
         renderer.draw_diagnostics(&mut self.state.stack);
-        renderer.row - renderer.first_row
+        let horizontal_off = renderer.row - renderer.first_row;
+        Position::new(horizontal_off as usize, col_off as usize)
     }
 
     fn reset_pos(&mut self, pos: usize) -> usize {
@@ -242,6 +300,6 @@ impl Decoration for InlineDiagnostics<'_> {
         grapheme: &FormattedGrapheme,
     ) -> usize {
         self.state
-            .proccess_anchor(grapheme, renderer.viewport.width, renderer.col_offset)
+            .proccess_anchor(grapheme, renderer.viewport.width, renderer.offset.col)
     }
 }

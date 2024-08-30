@@ -1,12 +1,8 @@
-use std::{cell::Cell, cmp::Ordering};
+use std::cmp::Ordering;
 
-use helix_core::{
-    coords_at_pos,
-    doc_formatter::{DocumentFormatter, FormattedGrapheme, TextFormat},
-    text_annotations::TextAnnotations,
-    Position, RopeSlice,
-};
-use helix_view::{editor::CursorCache, theme::Style};
+use helix_core::doc_formatter::FormattedGrapheme;
+use helix_core::Position;
+use helix_view::editor::CursorCache;
 
 use crate::ui::document::{LinePos, TextRenderer};
 
@@ -14,30 +10,31 @@ pub use diagnostics::InlineDiagnostics;
 
 mod diagnostics;
 
-/// Decorations are the primary mechanisim for extending the text rendering.
+/// Decorations are the primary mechanism for extending the text rendering.
 ///
-/// Any on-screen element which is anchored to the rendered text in some form should
-/// be implemented using this trait. Translating char positions to
-/// on-screen positions can be expensive and should not be done during rendering.
-/// Instead such translations are performed on the fly while the text is being rendered.
-/// The results are provided to this trait
+/// Any on-screen element which is anchored to the rendered text in some form
+/// should be implemented using this trait. Translating char positions to
+/// on-screen positions can be expensive and should not be done manually in the
+/// ui loop. Instead such translations are automatically performed on the fly
+/// while the text is being rendered. The results are provided to this trait by
+/// the rendering infrastructure.
 ///
 /// To reserve space for virtual text lines (which is then filled by this trait) emit appropriate
-/// [`LineAnnotation`](helix_core::text_annotations::LineAnnotation) in [`helix_view::View::text_annotations`]
+/// [`LineAnnotation`](helix_core::text_annotations::LineAnnotation)s in [`helix_view::View::text_annotations`]
 pub trait Decoration {
     /// Called **before** a **visual** line is rendered. A visual line does not
-    /// necessairly correspond to a single line in a document as soft wrapping can
+    /// necessarily correspond to a single line in a document as soft wrapping can
     /// spread a single document line across multiple visual lines.
     ///
     /// This function is called before text is rendered as any decorations should
     /// never overlap the document text. That means that setting the forground color
     /// here is (essentially) useless as the text color is overwritten by the
-    /// rendered text. This -ofcourse- doesn't apply when rendering inside virtual lines
-    /// below the line reserved by `LineAnnotation`s. e as no text will be rendered here.
+    /// rendered text. This _of course_ doesn't apply when rendering inside virtual lines
+    /// below the line reserved by `LineAnnotation`s as no text will be rendered here.
     fn decorate_line(&mut self, _renderer: &mut TextRenderer, _pos: LinePos) {}
 
     /// Called **after** a **visual** line is rendered. A visual line does not
-    /// necessairly correspond to a single line in a document as soft wrapping can
+    /// necessarily correspond to a single line in a document as soft wrapping can
     /// spread a single document line across multiple visual lines.
     ///
     /// This function is called after text is rendered so that decorations can collect
@@ -62,9 +59,9 @@ pub trait Decoration {
         &mut self,
         _renderer: &mut TextRenderer,
         _pos: LinePos,
-        _virt_off: u16,
-    ) -> u16 {
-        0
+        _virt_off: Position,
+    ) -> Position {
+        Position::new(0, 0)
     }
 
     fn reset_pos(&mut self, _pos: usize) -> usize {
@@ -78,7 +75,8 @@ pub trait Decoration {
     /// This function is called **before** the grapheme at `char_idx` is rendered.
     ///
     /// # Returns
-    /// The next
+    ///
+    /// The char idx of the next grapheme that  this function should be called for
     fn decorate_grapheme(
         &mut self,
         _renderer: &mut TextRenderer,
@@ -133,12 +131,14 @@ impl<'a> DecorationManager<'a> {
         }
     }
 
-    pub fn render_virtual_lines(&mut self, renderer: &mut TextRenderer, pos: LinePos) {
-        let mut virt_off = 1; // start at 1 so the line is never overwritten
+    pub fn render_virtual_lines(
+        &mut self,
+        renderer: &mut TextRenderer,
+        pos: LinePos,
+        line_width: usize,
+    ) {
+        let mut virt_off = Position::new(1, line_width); // start at 1 so the line is never overwritten
         for (decoration, _) in &mut self.decorations {
-            if pos.visual_line + virt_off >= renderer.viewport.height {
-                break;
-            }
             virt_off += decoration.render_virt_lines(renderer, pos, virt_off);
         }
     }
@@ -147,7 +147,7 @@ impl<'a> DecorationManager<'a> {
 /// Cursor rendering is done externally so all the cursor decoration
 /// does is save the position of primary cursor
 pub struct Cursor<'a> {
-    pub cache: &'a Cell<Option<Option<Position>>>,
+    pub cache: &'a CursorCache,
     pub primary_cursor: usize,
 }
 impl Decoration for Cursor<'_> {
@@ -164,109 +164,12 @@ impl Decoration for Cursor<'_> {
         renderer: &mut TextRenderer,
         grapheme: &FormattedGrapheme,
     ) -> usize {
-        if renderer.column_in_bounds(grapheme.visual_pos.col) {
-            let mut position = grapheme.visual_pos;
-            position.col -= renderer.col_offset;
-            self.cache.set(Some(Some(position)));
+        if renderer.column_in_bounds(grapheme.visual_pos.col)
+            && renderer.offset.row < grapheme.visual_pos.row
+        {
+            let position = grapheme.visual_pos - renderer.offset;
+            self.cache.set(Some(position));
         }
         usize::MAX
-    }
-}
-
-pub struct CopilotDecoration {
-    style: Style,
-    text: String,
-    row: usize,
-    col: usize,
-    view_width: u16,
-}
-
-impl CopilotDecoration {
-    pub fn new(
-        style: Style,
-        doc_text: RopeSlice,
-        completion_text: String,
-        completion_pos: usize,
-        view_width: u16,
-    ) -> CopilotDecoration {
-        let coords = coords_at_pos(doc_text, completion_pos);
-        CopilotDecoration {
-            style,
-            text: completion_text,
-            row: coords.row,
-            col: coords.col,
-            view_width,
-        }
-    }
-}
-
-impl Decoration for CopilotDecoration {
-    fn render_virt_lines(
-        &mut self,
-        _renderer: &mut TextRenderer,
-        _pos: LinePos,
-        _virt_off: u16,
-    ) -> u16 {
-        if _pos.doc_line != self.row {
-            return 0;
-        }
-
-        let mut lines = self.text.split('\n').enumerate();
-        lines.next();
-        let n_lines = lines.clone().count();
-
-        let mut text_fmt = TextFormat::default();
-        text_fmt.viewport_width = self.view_width;
-        let annotations = TextAnnotations::default();
-
-        while let Some((idx, line)) = lines.next() {
-            let formatter =
-                DocumentFormatter::new_at_prev_checkpoint(line.into(), &text_fmt, &annotations, 0);
-
-            for grapheme in formatter {
-                _renderer.draw_decoration_grapheme(
-                    grapheme.raw,
-                    self.style,
-                    _pos.visual_line + grapheme.visual_pos.row as u16 + idx as u16,
-                    grapheme.visual_pos.col as u16,
-                );
-            }
-        }
-
-        n_lines as u16
-    }
-
-    fn decorate_line(&mut self, _renderer: &mut TextRenderer, _pos: LinePos) {
-        if self.row != _pos.doc_line {
-            return;
-        }
-
-        let first_line = if let Some(split) = self.text.split_once('\n') {
-            split.0
-        } else {
-            &self.text
-        };
-
-        let mut text_fmt = TextFormat::default();
-        text_fmt.viewport_width = self.view_width;
-        let annotations = TextAnnotations::default();
-        let formatter = DocumentFormatter::new_at_prev_checkpoint(
-            first_line.into(),
-            &text_fmt,
-            &annotations,
-            0,
-        );
-
-        for grapheme in formatter {
-            if grapheme.char_idx < self.col {
-                continue;
-            }
-            _renderer.draw_decoration_grapheme(
-                grapheme.raw,
-                self.style,
-                _pos.visual_line + grapheme.visual_pos.row as u16,
-                grapheme.visual_pos.col as u16,
-            );
-        }
     }
 }
