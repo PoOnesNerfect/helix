@@ -960,7 +960,7 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
             self.show_preview && self.file_fn.is_some() && area.width > MIN_AREA_WIDTH_FOR_PREVIEW;
 
         let picker_width = if render_preview {
-            area.width / 2
+            (area.width / 2).max(area.width - 72)
         } else {
             area.width
         };

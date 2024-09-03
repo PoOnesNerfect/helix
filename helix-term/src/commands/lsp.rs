@@ -213,7 +213,7 @@ fn diag_picker(
 
     let mut columns = vec![
         ui::PickerColumn::new(
-            "severity",
+            "level",
             |item: &PickerDiagnostic, styles: &DiagnosticStyles| {
                 match item.diag.severity {
                     Some(DiagnosticSeverity::HINT) => Span::styled("HINT", styles.hint),
@@ -225,23 +225,23 @@ fn diag_picker(
                 .into()
             },
         ),
-        ui::PickerColumn::new("code", |item: &PickerDiagnostic, _| {
-            match item.diag.code.as_ref() {
-                Some(NumberOrString::Number(n)) => n.to_string().into(),
-                Some(NumberOrString::String(s)) => s.as_str().into(),
-                None => "".into(),
-            }
-        }),
+        // ui::PickerColumn::new("code", |item: &PickerDiagnostic, _| {
+        //     match item.diag.code.as_ref() {
+        //         Some(NumberOrString::Number(n)) => n.to_string().into(),
+        //         Some(NumberOrString::String(s)) => s.as_str().into(),
+        //         None => "".into(),
+        //     }
+        // }),
         ui::PickerColumn::new("message", |item: &PickerDiagnostic, _| {
             item.diag.message.as_str().into()
         }),
     ];
-    let mut primary_column = 2; // message
+    let mut primary_column = 1; // message
 
     if format == DiagnosticsFormat::ShowSourcePath {
         columns.insert(
             // between message code and message
-            2,
+            1,
             ui::PickerColumn::new("path", |item: &PickerDiagnostic, _| {
                 if let Some(path) = item.uri.as_path() {
                     path::get_truncated_path(path)
