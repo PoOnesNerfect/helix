@@ -6,7 +6,7 @@ pub(super) struct PickerQuery {
     column_names: Box<[Arc<str>]>,
     /// The index of the primary column in `column_names`.
     /// The primary column is selected by default unless another
-    /// field is specified explicitly with `%fieldname`.
+    /// field is specified explicitly with `@fieldname`.
     primary_column: usize,
     /// The mapping between column names and input in the query
     /// for those columns.
@@ -77,17 +77,17 @@ impl PickerQuery {
             match ch {
                 // Backslash escaping
                 _ if escaped => {
-                    // '%' is the only character that is special cased.
+                    // '@' is the only character that is special cased.
                     // You can escape it to prevent parsing the text that
                     // follows it as a field name.
-                    if ch != '%' {
+                    if ch != '@' {
                         text.push('\\');
                     }
                     text.push(ch);
                     escaped = false;
                 }
                 '\\' => escaped = !escaped,
-                '%' => {
+                '@' => {
                     if !text.is_empty() {
                         finish_field!();
                     }
