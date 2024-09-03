@@ -607,15 +607,6 @@ impl EditorView {
 
     /// Render bufferline at the top
     pub fn render_bufferline(editor: &Editor, viewport: Rect, surface: &mut Surface) {
-        // Define styles
-        surface.clear_with(
-            viewport,
-            editor
-                .theme
-                .try_get("ui.bufferline.background")
-                .unwrap_or_else(|| editor.theme.get("ui.statusline")),
-        );
-
         let bufferline_active = editor
             .theme
             .try_get("ui.bufferline.active")
@@ -632,8 +623,7 @@ impl EditorView {
         // Gather info on buffertabs
         let mut buffertabs = Vec::new();
 
-        let scratch = PathBuf::from(SCRATCH_BUFFER_NAME); // default filename to use for scratch buffer
-
+        // document paths names for differentiating same file names
         let documents_paths = build_bufferline_paths(editor);
 
         for doc in editor.documents() {
