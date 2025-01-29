@@ -222,8 +222,6 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "space" => { "Space"
             "f" => file_picker,
             "F" => file_picker_in_current_directory,
-            "e" => file_explorer,
-            "E" => file_explorer_in_current_buffer_directory,
             "b" => buffer_picker,
             "j" => jumplist_picker,
             "s" => symbol_picker,
@@ -289,7 +287,9 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "C" => toggle_block_comments,
             "A-c" => toggle_line_comments,
             "?" => command_palette,
-            "e" => reveal_current_file,
+            "e" => file_explorer,
+            // "E" => file_explorer_in_current_buffer_directory,
+            "E" => reveal_current_file,
         },
         "z" => { "View"
             "z" | "c" => align_view_center,
