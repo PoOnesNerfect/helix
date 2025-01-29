@@ -9,7 +9,7 @@ use crate::{
         document::{render_document, LinePos, TextRenderer},
         statusline,
         text_decorations::{self, Decoration, DecorationManager, InlineDiagnostics},
-        Completion, CompletionItem, Explorer, ProgressSpinners,
+        Completion, Explorer, ProgressSpinners,
     },
 };
 
