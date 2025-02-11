@@ -44,7 +44,7 @@ impl Context<'_> {
     /// let mut cx = Context::dummy(&mut jobs, &mut editor);
     /// ```
     #[cfg(test)]
-    pub fn dummy(jobs: &'a mut Jobs, editor: &'a mut helix_view::Editor) -> Context<'a> {
+    pub fn dummy<'a>(jobs: &'a mut Jobs, editor: &'a mut helix_view::Editor) -> Context<'a> {
         Context {
             jobs,
             scroll: None,
