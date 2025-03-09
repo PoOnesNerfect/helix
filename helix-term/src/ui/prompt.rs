@@ -591,12 +591,12 @@ impl Component for Prompt {
                 (self.callback_fn)(cx, &self.line, PromptEvent::Abort);
                 return close_fn;
             }
-            alt!('b') | ctrl!(Left) => self.move_cursor(Movement::BackwardWord(1)),
-            alt!('f') | ctrl!(Right) => self.move_cursor(Movement::ForwardWord(1)),
-            ctrl!('b') | key!(Left) => self.move_cursor(Movement::BackwardChar(1)),
-            ctrl!('f') | key!(Right) => self.move_cursor(Movement::ForwardChar(1)),
-            ctrl!('e') | key!(End) => self.move_end(),
-            ctrl!('a') | key!(Home) => self.move_start(),
+            ctrl!('b') | alt!('b') | ctrl!(Left) => self.move_cursor(Movement::BackwardWord(1)),
+            ctrl!('e') | alt!('f') | ctrl!(Right) => self.move_cursor(Movement::ForwardWord(1)),
+            ctrl!('h') | key!(Left) => self.move_cursor(Movement::BackwardChar(1)),
+            ctrl!('l') | key!(Right) => self.move_cursor(Movement::ForwardChar(1)),
+            ctrl!('j') | key!(End) => self.move_end(),
+            ctrl!('k') | key!(Home) => self.move_start(),
             ctrl!('w') | alt!(Backspace) | ctrl!(Backspace) => {
                 self.delete_word_backwards(cx.editor);
                 (self.callback_fn)(cx, &self.line, PromptEvent::Update);
@@ -605,7 +605,7 @@ impl Component for Prompt {
                 self.delete_word_forwards(cx.editor);
                 (self.callback_fn)(cx, &self.line, PromptEvent::Update);
             }
-            ctrl!('k') => {
+            ctrl!('d') => {
                 self.kill_to_end_of_line(cx.editor);
                 (self.callback_fn)(cx, &self.line, PromptEvent::Update);
             }
@@ -613,11 +613,11 @@ impl Component for Prompt {
                 self.kill_to_start_of_line(cx.editor);
                 (self.callback_fn)(cx, &self.line, PromptEvent::Update);
             }
-            ctrl!('h') | key!(Backspace) | shift!(Backspace) => {
+            key!(Backspace) | shift!(Backspace) => {
                 self.delete_char_backwards(cx.editor);
                 (self.callback_fn)(cx, &self.line, PromptEvent::Update);
             }
-            ctrl!('d') | key!(Delete) => {
+            key!(Delete) => {
                 self.delete_char_forwards(cx.editor);
                 (self.callback_fn)(cx, &self.line, PromptEvent::Update);
             }
