@@ -33,7 +33,6 @@ use helix_view::{
 };
 use std::{
     collections::HashMap, fmt::Display, mem::take, num::NonZeroUsize, path::PathBuf, rc::Rc,
-    sync::Arc,
 };
 
 use tui::{buffer::Buffer as Surface, text::Span};
