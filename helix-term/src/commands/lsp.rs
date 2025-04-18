@@ -13,7 +13,8 @@ use tui::{text::Span, widgets::Row};
 use super::{align_view, push_jump, Align, Context, Editor};
 
 use helix_core::{
-    syntax::LanguageServerFeature, text_annotations::InlineAnnotation, Selection, Uri,
+    diagnostic::DiagnosticProvider, syntax::LanguageServerFeature,
+    text_annotations::InlineAnnotation, Selection, Uri,
 };
 use helix_stdx::path;
 use helix_view::{
@@ -30,13 +31,7 @@ use crate::{
     ui::{self, overlay::overlaid, FileLocation, Picker, Popup, PromptEvent},
 };
 
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, HashSet},
-    fmt::Display,
-    future::Future,
-    path::Path,
-};
+use std::{cmp::Ordering, collections::HashSet, fmt::Display, future::Future, path::Path};
 
 /// Gets the first language server that is attached to a document which supports a specific feature.
 /// If there is no configured language server that supports the feature, this displays a status message.
@@ -208,7 +203,7 @@ type DiagnosticsPicker = Picker<PickerDiagnostic, DiagnosticStyles>;
 
 fn diag_picker(
     cx: &Context,
-    diagnostics: BTreeMap<Uri, Vec<(lsp::Diagnostic, LanguageServerId)>>,
+    diagnostics: impl IntoIterator<Item = (Uri, Vec<(lsp::Diagnostic, DiagnosticProvider)>)>,
     format: DiagnosticsFormat,
 ) -> DiagnosticsPicker {
     // TODO: drop current_path comparison and instead use workspace: bool flag?
@@ -218,8 +213,11 @@ fn diag_picker(
     for (uri, diags) in diagnostics {
         flat_diag.reserve(diags.len());
 
-        for (diag, ls) in diags {
-            if let Some(ls) = cx.editor.language_server_by_id(ls) {
+        for (diag, provider) in diags {
+            if let Some(ls) = provider
+                .language_server_id()
+                .and_then(|id| cx.editor.language_server_by_id(id))
+            {
                 flat_diag.push(PickerDiagnostic {
                     location: Location {
                         uri: uri.clone(),
@@ -344,9 +342,7 @@ pub fn symbol_picker(cx: &mut Context) {
                 .expect("docs with active language servers must be backed by paths");
 
             async move {
-                let json = request.await?;
-                let response: Option<lsp::DocumentSymbolResponse> = serde_json::from_value(json)?;
-                let symbols = match response {
+                let symbols = match request.await? {
                     Some(symbols) => symbols,
                     None => return anyhow::Ok(vec![]),
                 };
@@ -391,9 +387,11 @@ pub fn symbol_picker(cx: &mut Context) {
 
     cx.jobs.callback(async move {
         let mut symbols = Vec::new();
-        // TODO if one symbol request errors, all other requests are discarded (even if they're valid)
-        while let Some(mut lsp_items) = futures.try_next().await? {
-            symbols.append(&mut lsp_items);
+        while let Some(response) = futures.next().await {
+            match response {
+                Ok(mut items) => symbols.append(&mut items),
+                Err(err) => log::error!("Error requesting document symbols: {err}"),
+            }
         }
         let call = move |_editor: &mut Editor, compositor: &mut Compositor| {
             let columns = [
@@ -460,30 +458,34 @@ pub fn workspace_symbol_picker(cx: &mut Context) {
                     .unwrap();
                 let offset_encoding = language_server.offset_encoding();
                 async move {
-                    let json = request.await?;
+                    let symbols = request
+                        .await?
+                        .and_then(|resp| match resp {
+                            lsp::WorkspaceSymbolResponse::Flat(symbols) => Some(symbols),
+                            lsp::WorkspaceSymbolResponse::Nested(_) => None,
+                        })
+                        .unwrap_or_default();
 
-                    let response: Vec<_> =
-                        serde_json::from_value::<Option<Vec<lsp::SymbolInformation>>>(json)?
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter_map(|symbol| {
-                                let uri = match Uri::try_from(&symbol.location.uri) {
-                                    Ok(uri) => uri,
-                                    Err(err) => {
-                                        log::warn!("discarding symbol with invalid URI: {err}");
-                                        return None;
-                                    }
-                                };
-                                Some(SymbolInformationItem {
-                                    location: Location {
-                                        uri,
-                                        range: symbol.location.range,
-                                        offset_encoding,
-                                    },
-                                    symbol,
-                                })
+                    let response: Vec<_> = symbols
+                        .into_iter()
+                        .filter_map(|symbol| {
+                            let uri = match Uri::try_from(&symbol.location.uri) {
+                                Ok(uri) => uri,
+                                Err(err) => {
+                                    log::warn!("discarding symbol with invalid URI: {err}");
+                                    return None;
+                                }
+                            };
+                            Some(SymbolInformationItem {
+                                location: Location {
+                                    uri,
+                                    range: symbol.location.range,
+                                    offset_encoding,
+                                },
+                                symbol,
                             })
-                            .collect();
+                        })
+                        .collect();
 
                     anyhow::Ok(response)
                 }
@@ -496,10 +498,14 @@ pub fn workspace_symbol_picker(cx: &mut Context) {
 
         let injector = injector.clone();
         async move {
-            // TODO if one symbol request errors, all other requests are discarded (even if they're valid)
-            while let Some(lsp_items) = futures.try_next().await? {
-                for item in lsp_items {
-                    injector.push(item)?;
+            while let Some(response) = futures.next().await {
+                match response {
+                    Ok(items) => {
+                        for item in items {
+                            injector.push(item)?;
+                        }
+                    }
+                    Err(err) => log::error!("Error requesting workspace symbols: {err}"),
                 }
             }
             Ok(())
@@ -553,11 +559,7 @@ pub fn diagnostics_picker(cx: &mut Context) {
     let doc = doc!(cx.editor);
     if let Some(uri) = doc.uri() {
         let diagnostics = cx.editor.diagnostics.get(&uri).cloned().unwrap_or_default();
-        let picker = diag_picker(
-            cx,
-            [(uri, diagnostics)].into(),
-            DiagnosticsFormat::HideSourcePath,
-        );
+        let picker = diag_picker(cx, [(uri, diagnostics)], DiagnosticsFormat::HideSourcePath);
         cx.push_layer(Box::new(overlaid(picker)));
     }
 }
@@ -675,11 +677,8 @@ pub fn code_action(cx: &mut Context) {
             Some((code_action_request, language_server_id))
         })
         .map(|(request, ls_id)| async move {
-            let json = request.await?;
-            let response: Option<lsp::CodeActionResponse> = serde_json::from_value(json)?;
-            let mut actions = match response {
-                Some(a) => a,
-                None => return anyhow::Ok(Vec::new()),
+            let Some(mut actions) = request.await? else {
+                return anyhow::Ok(Vec::new());
             };
 
             // remove disabled code actions
@@ -744,9 +743,12 @@ pub fn code_action(cx: &mut Context) {
 
     cx.jobs.callback(async move {
         let mut actions = Vec::new();
-        // TODO if one code action request errors, all other requests are ignored (even if they're valid)
-        while let Some(mut lsp_items) = futures.try_next().await? {
-            actions.append(&mut lsp_items);
+
+        while let Some(output) = futures.next().await {
+            match output {
+                Ok(mut lsp_items) => actions.append(&mut lsp_items),
+                Err(err) => log::error!("while gathering code actions: {err}"),
+            }
         }
 
         let call = move |editor: &mut Editor, compositor: &mut Compositor| {
@@ -771,22 +773,16 @@ pub fn code_action(cx: &mut Context) {
                 match &action.lsp_item {
                     lsp::CodeActionOrCommand::Command(command) => {
                         log::debug!("code action command: {:?}", command);
-                        execute_lsp_command(editor, action.language_server_id, command.clone());
+                        editor.execute_lsp_command(command.clone(), action.language_server_id);
                     }
                     lsp::CodeActionOrCommand::CodeAction(code_action) => {
                         log::debug!("code action: {:?}", code_action);
                         // we support lsp "codeAction/resolve" for `edit` and `command` fields
                         let mut resolved_code_action = None;
                         if code_action.edit.is_none() || code_action.command.is_none() {
-                            if let Some(future) =
-                                language_server.resolve_code_action(code_action.clone())
-                            {
-                                if let Ok(response) = helix_lsp::block_on(future) {
-                                    if let Ok(code_action) =
-                                        serde_json::from_value::<CodeAction>(response)
-                                    {
-                                        resolved_code_action = Some(code_action);
-                                    }
+                            if let Some(future) = language_server.resolve_code_action(code_action) {
+                                if let Ok(code_action) = helix_lsp::block_on(future) {
+                                    resolved_code_action = Some(code_action);
                                 }
                             }
                         }
@@ -800,7 +796,7 @@ pub fn code_action(cx: &mut Context) {
                         // if code action provides both edit and command first the edit
                         // should be applied and then the command
                         if let Some(command) = &code_action.command {
-                            execute_lsp_command(editor, action.language_server_id, command.clone());
+                            editor.execute_lsp_command(command.clone(), action.language_server_id);
                         }
                     }
                 }
@@ -813,33 +809,6 @@ pub fn code_action(cx: &mut Context) {
         };
 
         Ok(Callback::EditorCompositor(Box::new(call)))
-    });
-}
-
-pub fn execute_lsp_command(
-    editor: &mut Editor,
-    language_server_id: LanguageServerId,
-    cmd: lsp::Command,
-) {
-    // the command is executed on the server and communicated back
-    // to the client asynchronously using workspace edits
-    let future = match editor
-        .language_server_by_id(language_server_id)
-        .and_then(|language_server| language_server.command(cmd))
-    {
-        Some(future) => future,
-        None => {
-            editor.set_error("Language server does not support executing commands");
-            return;
-        }
-    };
-
-    tokio::spawn(async move {
-        let res = future.await;
-
-        if let Err(e) = res {
-            log::error!("execute LSP command: {}", e);
-        }
     });
 }
 
@@ -905,7 +874,7 @@ fn goto_impl(editor: &mut Editor, compositor: &mut Compositor, locations: Vec<Lo
 fn goto_single_impl<P, F>(cx: &mut Context, feature: LanguageServerFeature, request_provider: P)
 where
     P: Fn(&Client, lsp::Position, lsp::TextDocumentIdentifier) -> Option<F>,
-    F: Future<Output = helix_lsp::Result<serde_json::Value>> + 'static + Send,
+    F: Future<Output = helix_lsp::Result<Option<lsp::GotoDefinitionResponse>>> + 'static + Send,
 {
     let (view, doc) = current_ref!(cx.editor);
     let mut futures: FuturesOrdered<_> = doc
@@ -914,44 +883,41 @@ where
             let offset_encoding = language_server.offset_encoding();
             let pos = doc.position(view.id, offset_encoding);
             let future = request_provider(language_server, pos, doc.identifier()).unwrap();
-            async move {
-                let json = future.await?;
-                let response: Option<lsp::GotoDefinitionResponse> = serde_json::from_value(json)?;
-                anyhow::Ok((response, offset_encoding))
-            }
+            async move { anyhow::Ok((future.await?, offset_encoding)) }
         })
         .collect();
 
     cx.jobs.callback(async move {
         let mut locations = Vec::new();
-        while let Some((response, offset_encoding)) = futures.try_next().await? {
+        while let Some(response) = futures.next().await {
             match response {
-                Some(lsp::GotoDefinitionResponse::Scalar(lsp_location)) => {
-                    locations.extend(lsp_location_to_location(lsp_location, offset_encoding));
-                }
-                Some(lsp::GotoDefinitionResponse::Array(lsp_locations)) => {
-                    locations.extend(
-                        lsp_locations.into_iter().flat_map(|location| {
+                Ok((response, offset_encoding)) => match response {
+                    Some(lsp::GotoDefinitionResponse::Scalar(lsp_location)) => {
+                        locations.extend(lsp_location_to_location(lsp_location, offset_encoding));
+                    }
+                    Some(lsp::GotoDefinitionResponse::Array(lsp_locations)) => {
+                        locations.extend(lsp_locations.into_iter().flat_map(|location| {
                             lsp_location_to_location(location, offset_encoding)
-                        }),
-                    );
-                }
-                Some(lsp::GotoDefinitionResponse::Link(lsp_locations)) => {
-                    locations.extend(
-                        lsp_locations
-                            .into_iter()
-                            .map(|location_link| {
-                                lsp::Location::new(
-                                    location_link.target_uri,
-                                    location_link.target_range,
-                                )
-                            })
-                            .flat_map(|location| {
-                                lsp_location_to_location(location, offset_encoding)
-                            }),
-                    );
-                }
-                None => (),
+                        }));
+                    }
+                    Some(lsp::GotoDefinitionResponse::Link(lsp_locations)) => {
+                        locations.extend(
+                            lsp_locations
+                                .into_iter()
+                                .map(|location_link| {
+                                    lsp::Location::new(
+                                        location_link.target_uri,
+                                        location_link.target_range,
+                                    )
+                                })
+                                .flat_map(|location| {
+                                    lsp_location_to_location(location, offset_encoding)
+                                }),
+                        );
+                    }
+                    None => (),
+                },
+                Err(err) => log::error!("Error requesting locations: {err}"),
             }
         }
         let call = move |editor: &mut Editor, compositor: &mut Compositor| {
@@ -1014,23 +980,22 @@ pub fn goto_reference(cx: &mut Context) {
                     None,
                 )
                 .unwrap();
-            async move {
-                let json = future.await?;
-                let locations: Option<Vec<lsp::Location>> = serde_json::from_value(json)?;
-                anyhow::Ok((locations, offset_encoding))
-            }
+            async move { anyhow::Ok((future.await?, offset_encoding)) }
         })
         .collect();
 
     cx.jobs.callback(async move {
         let mut locations = Vec::new();
-        while let Some((lsp_locations, offset_encoding)) = futures.try_next().await? {
-            locations.extend(
-                lsp_locations
-                    .into_iter()
-                    .flatten()
-                    .flat_map(|location| lsp_location_to_location(location, offset_encoding)),
-            );
+        while let Some(response) = futures.next().await {
+            match response {
+                Ok((lsp_locations, offset_encoding)) => locations.extend(
+                    lsp_locations
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|location| lsp_location_to_location(location, offset_encoding)),
+                ),
+                Err(err) => log::error!("Error requesting references: {err}"),
+            }
         }
         let call = move |editor: &mut Editor, compositor: &mut Compositor| {
             if locations.is_empty() {
@@ -1082,9 +1047,11 @@ pub fn hover(cx: &mut Context) {
     cx.jobs.callback(async move {
         let mut hovers: Vec<(String, lsp::Hover)> = Vec::new();
 
-        while let Some((server_name, hover)) = futures.try_next().await? {
-            if let Some(hover) = hover {
-                hovers.push((server_name, hover));
+        while let Some(response) = futures.next().await {
+            match response {
+                Ok((server_name, Some(hover))) => hovers.push((server_name, hover)),
+                Ok(_) => (),
+                Err(err) => log::error!("Error requesting hover: {err}"),
             }
         }
 
@@ -1175,7 +1142,9 @@ pub fn rename_symbol(cx: &mut Context) {
 
                 match block_on(future) {
                     Ok(edits) => {
-                        let _ = cx.editor.apply_workspace_edit(offset_encoding, &edits);
+                        let _ = cx
+                            .editor
+                            .apply_workspace_edit(offset_encoding, &edits.unwrap_or_default());
                     }
                     Err(err) => cx.editor.set_error(err.to_string()),
                 }
