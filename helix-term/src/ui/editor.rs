@@ -19,7 +19,7 @@ use helix_core::{
     movement::Direction,
     syntax::{self, OverlayHighlights},
     text_annotations::TextAnnotations,
-    unicode::width::UnicodeWidthStr,
+    unicode::{segmentation::UnicodeSegmentation, width::UnicodeWidthStr},
     visual_offset_from_block, Change, Position, Range, Selection, Transaction,
 };
 use helix_view::{
@@ -55,6 +55,17 @@ pub enum InsertEvent {
     },
     TriggerCompletion,
     RequestCompletion,
+}
+
+/// A single rendered tab in the bufferline together with its computed geometry.
+#[derive(Debug, Clone)]
+struct BufferTab {
+    active: bool,
+    text: String,
+    width: u16,
+    /// Horizontal offset within the bufferline before scrolling is applied.
+    x: i32,
+    style: Style,
 }
 
 impl EditorView {
@@ -662,13 +673,6 @@ impl EditorView {
     /// Render bufferline at the top
     pub fn render_bufferline(editor: &Editor, viewport: Rect, surface: &mut Surface) {
         let scratch = PathBuf::from(SCRATCH_BUFFER_NAME); // default filename to use for scratch buffer
-        surface.clear_with(
-            viewport,
-            editor
-                .theme
-                .try_get("ui.bufferline.background")
-                .unwrap_or_else(|| editor.theme.get("ui.statusline")),
-        );
 
         let bufferline_active = editor
             .theme
@@ -680,9 +684,11 @@ impl EditorView {
             .try_get("ui.bufferline")
             .unwrap_or_else(|| editor.theme.get("ui.statusline.inactive"));
 
-        let mut x = viewport.x;
         let current_doc = view!(editor).doc;
 
+        // First pass: lay every buffer tab out end to end, recording geometry.
+        let mut x = viewport.x as i32;
+        let mut tabs = Vec::new();
         for doc in editor.documents() {
             let fname = doc
                 .path()
@@ -692,23 +698,92 @@ impl EditorView {
                 .to_str()
                 .unwrap_or_default();
 
-            let style = if current_doc == doc.id() {
+            let active = current_doc == doc.id();
+            let style = if active {
                 bufferline_active
             } else {
                 bufferline_inactive
             };
 
             let text = format!(" {}{} ", fname, if doc.is_modified() { "[+]" } else { "" });
-            let used_width = viewport.x.saturating_sub(x);
-            let rem_width = surface.area.width.saturating_sub(used_width);
+            let width = text.graphemes(true).count() as u16;
 
-            x = surface
-                .set_stringn(x, viewport.y, &text, rem_width as usize, style)
-                .0;
+            tabs.push(BufferTab {
+                active,
+                text,
+                width,
+                x,
+                style,
+            });
+            x = x.saturating_add(width as i32);
+        }
 
-            if x >= surface.area.right() {
+        surface.clear_with(
+            viewport,
+            editor
+                .theme
+                .try_get("ui.bufferline.background")
+                .unwrap_or_else(|| editor.theme.get("ui.statusline")),
+        );
+
+        // No open documents: nothing else to draw once the line is cleared.
+        let Some(active_tab) = tabs.iter().find(|tab| tab.active) else {
+            return;
+        };
+
+        // Scroll so the active tab sits as close to the viewport centre as
+        // possible, then clamp so we never scroll past the right-most tab.
+        let viewport_center = viewport.x as i32 + viewport.width as i32 / 2;
+        let active_center = active_tab.x + active_tab.width as i32 / 2;
+
+        let rightmost = tabs.last().expect("at least one tab is present");
+        let full_width = rightmost.x + rightmost.width as i32;
+        let max_displacement = (full_width - viewport.width as i32).max(0);
+        let displacement = (active_center - viewport_center).clamp(0, max_displacement);
+
+        // Underflow: content scrolled off the left. Overflow: off the right.
+        let mark_underflow = displacement > 0;
+        let mark_overflow = displacement < max_displacement;
+
+        for tab in &mut tabs {
+            tab.x -= displacement;
+
+            // Skip tabs entirely off the left edge.
+            if tab.x + tab.width as i32 <= viewport.x as i32 {
+                continue;
+            }
+            // Clip a tab that is partially off the left edge.
+            if tab.x < viewport.x as i32 {
+                let hidden = (viewport.x as i32 - tab.x) as usize;
+                tab.text = tab.text.graphemes(true).skip(hidden).collect();
+                tab.width = tab.width.saturating_sub(hidden as u16);
+                tab.x = viewport.x as i32;
+            }
+            // Stop once we run off the right edge.
+            if tab.x >= viewport.right() as i32 {
                 break;
             }
+
+            surface.set_stringn(
+                tab.x as u16,
+                viewport.y,
+                &tab.text,
+                (viewport.right() as usize).saturating_sub(tab.x as usize),
+                tab.style,
+            );
+        }
+
+        // Draw the under/overflow markers on top of the line edges.
+        let markers = editor
+            .theme
+            .try_get("ui.bufferline.marker")
+            .unwrap_or_else(|| editor.theme.get("ui.bufferline"));
+
+        if mark_underflow {
+            surface.set_string(viewport.left(), viewport.top(), " < ", markers);
+        }
+        if mark_overflow {
+            surface.set_string(viewport.right() - 3, viewport.top(), " > ", markers);
         }
     }
 
