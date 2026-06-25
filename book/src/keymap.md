@@ -509,3 +509,22 @@ Keys to use within prompt, Remapping currently not supported.
 | `Tab`                                       | Select next completion item                                             |
 | `BackTab`                                   | Select previous completion item                                         |
 | `Enter`                                     | Open selected                                                           |
+
+# Sidebar file explorer
+
+In addition to the built-in picker-based [`file_explorer`](#space-mode), this build
+provides a persistent **sidebar** tree explorer. It is not bound in the default
+keymap (to avoid shadowing `file_explorer`); bind its commands in your
+`config.toml`, for example:
+
+```toml
+[keys.normal.space]
+E = "open_or_focus_explorer"  # open / focus the sidebar tree
+e = "reveal_current_file"     # reveal the current file in the sidebar
+```
+
+Available commands: `open_or_focus_explorer` and `reveal_current_file`. Its
+position and width are configurable under `[editor.explorer]` (`position` =
+`left`/`right`, `column-width`). While the sidebar is focused press `?` to see
+its keymap; remapping the sidebar's internal keys is currently not supported.
+
