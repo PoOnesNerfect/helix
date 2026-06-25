@@ -1036,7 +1036,10 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
             self.show_preview && self.file_fn.is_some() && area.width > MIN_AREA_WIDTH_FOR_PREVIEW;
 
         let picker_width = if render_preview {
-            area.width / 2
+            // Give the list at least half the width, but cap the preview pane
+            // at MIN_AREA_WIDTH_FOR_PREVIEW so it does not grow unbounded on
+            // very wide terminals.
+            (area.width / 2).max(area.width.saturating_sub(MIN_AREA_WIDTH_FOR_PREVIEW))
         } else {
             area.width
         };
@@ -1179,7 +1182,9 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
             self.show_preview && self.file_fn.is_some() && area.width > MIN_AREA_WIDTH_FOR_PREVIEW;
 
         let picker_width = if render_preview {
-            area.width / 2
+            // Match the split used in `render` so the prompt cursor stays
+            // aligned with the picker pane.
+            (area.width / 2).max(area.width.saturating_sub(MIN_AREA_WIDTH_FOR_PREVIEW))
         } else {
             area.width
         };
