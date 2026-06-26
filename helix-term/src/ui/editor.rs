@@ -29,9 +29,16 @@ use helix_view::{
     graphics::{Color, CursorKind, Modifier, Rect, Style},
     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
     keyboard::{KeyCode, KeyModifiers},
-    Document, Editor, Theme, View,
+    Document, DocumentId, Editor, Theme, View,
 };
-use std::{mem::take, num::NonZeroUsize, ops, path::PathBuf, rc::Rc};
+use std::{
+    collections::HashMap,
+    mem::take,
+    num::NonZeroUsize,
+    ops,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use tui::{buffer::Buffer as Surface, text::Span};
 
@@ -663,7 +670,6 @@ impl EditorView {
 
     /// Render bufferline at the top
     pub fn render_bufferline(editor: &Editor, viewport: Rect, surface: &mut Surface) {
-        let scratch = PathBuf::from(SCRATCH_BUFFER_NAME); // default filename to use for scratch buffer
         surface.clear_with(
             viewport,
             editor
@@ -685,14 +691,15 @@ impl EditorView {
         let mut x = viewport.x;
         let current_doc = view!(editor).doc;
 
+        // Disambiguate buffers that share a file name by extending each label
+        // with as many trailing path components as needed to make it unique.
+        let names = bufferline_names(editor);
+
         for doc in editor.documents() {
-            let fname = doc
-                .path()
-                .unwrap_or(&scratch)
-                .file_name()
-                .unwrap_or_default()
-                .to_str()
-                .unwrap_or_default();
+            let fname = names
+                .get(&doc.id())
+                .map(String::as_str)
+                .unwrap_or(SCRATCH_BUFFER_NAME);
 
             let style = if current_doc == doc.id() {
                 bufferline_active
@@ -1801,6 +1808,67 @@ impl Component for EditorView {
             cursor => cursor,
         }
     }
+}
+
+/// Computes the bufferline label for every open document, disambiguating
+/// duplicate file names by extending each label with as many trailing path
+/// components as required for it to become unique (e.g. `src/main.rs` vs
+/// `tests/main.rs`). Documents without a path (scratch buffers) are omitted
+/// and fall back to the scratch label at the call site.
+fn bufferline_names(editor: &Editor) -> HashMap<DocumentId, String> {
+    // Track each document's path alongside how many trailing components are
+    // currently used to render its label.
+    let mut paths: HashMap<DocumentId, (PathBuf, usize)> = editor
+        .documents()
+        .filter_map(|doc| {
+            let path = doc.relative_path().or_else(|| doc.path())?.to_path_buf();
+            Some((doc.id(), (path, 1)))
+        })
+        .collect();
+
+    // Repeatedly lengthen any labels that still collide until all are unique.
+    loop {
+        let mut by_label: HashMap<String, Vec<DocumentId>> = HashMap::new();
+        for (&id, (path, level)) in &paths {
+            by_label
+                .entry(trailing_components(path, *level))
+                .or_default()
+                .push(id);
+        }
+
+        let mut changed = false;
+        for ids in by_label.into_values().filter(|ids| ids.len() > 1) {
+            for id in ids {
+                let (path, level) = paths.get_mut(&id).expect("id originates from paths");
+                // Only lengthen while components remain; this guarantees
+                // termination even when two documents share the same path.
+                if *level < path.components().count() {
+                    *level += 1;
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    paths
+        .into_iter()
+        .map(|(id, (path, level))| (id, trailing_components(&path, level)))
+        .collect()
+}
+
+/// Renders the last `count` components of `path` as a display string.
+fn trailing_components(path: &Path, count: usize) -> String {
+    let mut components: Vec<_> = path.components().rev().take(count).collect();
+    components.reverse();
+    components
+        .iter()
+        .collect::<PathBuf>()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn canonicalize_key(key: &mut KeyEvent) {
