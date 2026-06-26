@@ -15,16 +15,23 @@ events! {
 }
 
 pub fn register() {
-    register_event::<OnModeSwitch>();
-    register_event::<PostInsertChar>();
-    register_event::<PostCommand>();
-    register_event::<DocumentDidOpen>();
-    register_event::<DocumentDidChange>();
-    register_event::<DocumentDidClose>();
-    register_event::<DocumentFocusLost>();
-    register_event::<SelectionDidChange>();
-    register_event::<DiagnosticsDidChange>();
-    register_event::<LanguageServerInitialized>();
-    register_event::<LanguageServerExited>();
-    register_event::<ConfigDidChange>();
+    // Registering an event twice panics (the registry enforces this for
+    // soundness). Production registers exactly once, but unit tests may build
+    // several throwaway editors in the same process, so guard with a `Once` to
+    // make repeated calls a no-op rather than a panic.
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(|| {
+        register_event::<OnModeSwitch>();
+        register_event::<PostInsertChar>();
+        register_event::<PostCommand>();
+        register_event::<DocumentDidOpen>();
+        register_event::<DocumentDidChange>();
+        register_event::<DocumentDidClose>();
+        register_event::<DocumentFocusLost>();
+        register_event::<SelectionDidChange>();
+        register_event::<DiagnosticsDidChange>();
+        register_event::<LanguageServerInitialized>();
+        register_event::<LanguageServerExited>();
+        register_event::<ConfigDidChange>();
+    });
 }

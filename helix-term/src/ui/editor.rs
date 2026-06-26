@@ -9,7 +9,7 @@ use crate::{
         document::{render_document, LinePos, TextRenderer},
         statusline,
         text_decorations::{self, Decoration, DecorationManager, InlineDiagnostics},
-        Completion, ProgressSpinners,
+        Completion, Explorer, ProgressSpinners,
     },
 };
 
@@ -42,6 +42,7 @@ pub struct EditorView {
     pub(crate) last_insert: (commands::MappableCommand, Vec<InsertEvent>),
     pub(crate) completion: Option<Completion>,
     spinners: ProgressSpinners,
+    pub(crate) explorer: Option<Explorer>,
     /// Tracks if the terminal window is focused by reaction to terminal focus events
     terminal_focused: bool,
 }
@@ -66,6 +67,7 @@ impl EditorView {
             last_insert: (commands::MappableCommand::normal_mode, Vec::new()),
             completion: None,
             spinners: ProgressSpinners::default(),
+            explorer: None,
             terminal_focused: true,
         }
     }
@@ -1452,6 +1454,11 @@ impl Component for EditorView {
         event: &Event,
         context: &mut crate::compositor::Context,
     ) -> EventResult {
+        if let Some(explore) = self.explorer.as_mut() {
+            if let EventResult::Consumed(callback) = explore.handle_event(event, context) {
+                return EventResult::Consumed(callback);
+            }
+        }
         let mut cx = commands::Context {
             editor: context.editor,
             count: None,
@@ -1634,11 +1641,37 @@ impl Component for EditorView {
             editor_area = editor_area.clip_top(1);
         }
 
+        // Reserve a column for the file explorer when it is docked open.
+        if let Some(explorer) = &self.explorer {
+            let explorer_column_width = if explorer.is_opened() {
+                explorer.column_width().saturating_add(2)
+            } else {
+                0
+            };
+            use helix_view::editor::ExplorerPosition;
+            editor_area = match config.explorer.position {
+                ExplorerPosition::Left => editor_area.clip_left(explorer_column_width),
+                ExplorerPosition::Right => editor_area.clip_right(explorer_column_width),
+            };
+        }
+
         // if the terminal size suddenly changed, we need to trigger a resize
         cx.editor.resize(editor_area);
 
         if use_bufferline {
             Self::render_bufferline(cx.editor, area.with_height(1), surface);
+        }
+
+        // Render the explorer behind the editor when it is not focused.
+        if let Some(explorer) = self.explorer.as_mut() {
+            if !explorer.is_focus() {
+                let area = if use_bufferline {
+                    area.clip_top(1)
+                } else {
+                    area
+                };
+                explorer.render(area, surface, cx);
+            }
         }
 
         for (view, is_focused) in cx.editor.tree.views() {
@@ -1732,9 +1765,29 @@ impl Component for EditorView {
         if let Some(completion) = self.completion.as_mut() {
             completion.render(area, surface, cx);
         }
+
+        // Render the explorer on top of the editor when it is focused.
+        if let Some(explorer) = self.explorer.as_mut() {
+            if explorer.is_focus() {
+                let area = if use_bufferline {
+                    area.clip_top(1)
+                } else {
+                    area
+                };
+                explorer.render(area, surface, cx);
+            }
+        }
     }
 
     fn cursor(&self, _area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
+        if let Some(explore) = &self.explorer {
+            if explore.is_focus() {
+                let cursor = explore.cursor(_area, editor);
+                if cursor.0.is_some() {
+                    return cursor;
+                }
+            }
+        }
         match editor.cursor() {
             // all block cursors are drawn manually
             (pos, CursorKind::Block) => {

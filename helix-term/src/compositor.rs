@@ -37,6 +37,51 @@ impl Context<'_> {
     }
 }
 
+#[cfg(test)]
+impl Context<'_> {
+    /// Builds a throwaway [`Context`] for testing a component's `handle_event`
+    /// without escalating to a full integration test.
+    ///
+    /// ```ignore
+    /// let mut editor = Context::dummy_editor();
+    /// let mut jobs = Context::dummy_jobs();
+    /// let mut cx = Context::dummy(&mut jobs, &mut editor);
+    /// ```
+    pub fn dummy<'a>(jobs: &'a mut Jobs, editor: &'a mut helix_view::Editor) -> Context<'a> {
+        Context {
+            jobs,
+            scroll: None,
+            editor,
+        }
+    }
+
+    pub fn dummy_jobs() -> Jobs {
+        Jobs::new()
+    }
+
+    pub fn dummy_editor() -> Editor {
+        use crate::config::Config;
+        use crate::handlers;
+        use arc_swap::{access::Map, ArcSwap};
+        use helix_view::theme;
+        use std::sync::Arc;
+
+        let config = Arc::new(ArcSwap::from_pointee(Config::default()));
+        Editor::new(
+            Rect::new(0, 0, 60, 120),
+            Arc::new(theme::Loader::new(&[])),
+            Arc::new(ArcSwap::from_pointee(
+                helix_core::config::default_lang_loader(),
+            )),
+            Arc::new(Map::new(Arc::clone(&config), |config: &Config| {
+                &config.editor
+            })),
+            handlers::setup(config),
+            helix_loader::workspace_trust::WorkspaceTrust::new(Default::default()),
+        )
+    }
+}
+
 pub trait Component: Any + AnyComponent {
     /// Process input events, return true if handled.
     fn handle_event(&mut self, _event: &Event, _ctx: &mut Context) -> EventResult {
@@ -72,6 +117,22 @@ pub trait Component: Any + AnyComponent {
 
     fn id(&self) -> Option<&'static str> {
         None
+    }
+
+    #[cfg(test)]
+    /// Utility method for testing `handle_event` without using an integration
+    /// test. Especially useful for helper components such as `Prompt`,
+    /// `TreeView` etc.
+    fn handle_events(&mut self, events: &str) -> anyhow::Result<()> {
+        use helix_view::input::parse_macro;
+
+        let mut editor = Context::dummy_editor();
+        let mut jobs = Context::dummy_jobs();
+        let mut cx = Context::dummy(&mut jobs, &mut editor);
+        for event in parse_macro(events)? {
+            self.handle_event(&Event::Key(event), &mut cx);
+        }
+        Ok(())
     }
 }
 
