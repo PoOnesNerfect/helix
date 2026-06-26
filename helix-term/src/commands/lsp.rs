@@ -3,7 +3,7 @@ use helix_lsp::{
     block_on,
     lsp::{
         self, CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionTriggerKind,
-        DiagnosticSeverity, NumberOrString,
+        DiagnosticSeverity,
     },
     util::{diagnostic_to_lsp_diagnostic, lsp_range_to_range, range_to_lsp_range},
     Client, LanguageServerId, OffsetEncoding,
@@ -253,7 +253,7 @@ fn diag_picker(
 
     let mut columns = vec![
         ui::PickerColumn::new(
-            "severity",
+            "level",
             |item: &PickerDiagnostic, styles: &DiagnosticStyles| {
                 match item.diag.severity {
                     Some(DiagnosticSeverity::HINT) => Span::styled("HINT", styles.hint),
@@ -268,23 +268,18 @@ fn diag_picker(
         ui::PickerColumn::new("source", |item: &PickerDiagnostic, _| {
             item.diag.source.as_deref().unwrap_or("").into()
         }),
-        ui::PickerColumn::new("code", |item: &PickerDiagnostic, _| {
-            match item.diag.code.as_ref() {
-                Some(NumberOrString::Number(n)) => n.to_string().into(),
-                Some(NumberOrString::String(s)) => s.as_str().into(),
-                None => "".into(),
-            }
-        }),
+        // The diagnostic `code` column is intentionally hidden to keep the
+        // picker compact; the `source` column above already disambiguates.
         ui::PickerColumn::new("message", |item: &PickerDiagnostic, _| {
             item.diag.message.as_str().into()
         }),
     ];
-    let mut primary_column = 3; // message
+    let mut primary_column = 2; // message
 
     if format == DiagnosticsFormat::ShowSourcePath {
         columns.insert(
-            // between message code and message
-            3,
+            // just before the message column
+            2,
             ui::PickerColumn::new("path", |item: &PickerDiagnostic, _| {
                 if let Some(path) = item.location.uri.as_path() {
                     path::get_truncated_path(path)

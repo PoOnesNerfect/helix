@@ -6,7 +6,7 @@ pub(super) struct PickerQuery {
     column_names: Box<[Arc<str>]>,
     /// The index of the primary column in `column_names`.
     /// The primary column is selected by default unless another
-    /// field is specified explicitly with `%fieldname`.
+    /// field is specified explicitly with `@fieldname`.
     primary_column: usize,
     /// The mapping between column names and input in the query
     /// for those columns.
@@ -77,17 +77,17 @@ impl PickerQuery {
             match ch {
                 // Backslash escaping
                 _ if escaped => {
-                    // '%' is the only character that is special cased.
+                    // '@' is the only character that is special cased.
                     // You can escape it to prevent parsing the text that
                     // follows it as a field name.
-                    if ch != '%' {
+                    if ch != '@' {
                         text.push('\\');
                     }
                     text.push(ch);
                     escaped = false;
                 }
                 '\\' => escaped = !escaped,
-                '%' => {
+                '@' => {
                     if !text.is_empty() {
                         finish_field!();
                     }
@@ -186,7 +186,7 @@ mod test {
                 "primary".into() => "hello world".into(),
             )
         );
-        query.parse("hello %field1 world %field2 !");
+        query.parse("hello @field1 world @field2 !");
         assert_eq!(
             query,
             hashmap!(
@@ -195,7 +195,7 @@ mod test {
                 "field2".into() => "!".into(),
             )
         );
-        query.parse("%field1 abc %field2 def xyz");
+        query.parse("@field1 abc @field2 def xyz");
         assert_eq!(
             query,
             hashmap!(
@@ -214,7 +214,7 @@ mod test {
         );
 
         // Unknown fields are trimmed.
-        query.parse("hello %foo");
+        query.parse("hello @foo");
         assert_eq!(
             query,
             hashmap!(
@@ -223,7 +223,7 @@ mod test {
         );
 
         // Multiple words in a field
-        query.parse("hello %field1 a b c");
+        query.parse("hello @field1 a b c");
         assert_eq!(
             query,
             hashmap!(
@@ -240,21 +240,21 @@ mod test {
                 "primary".into() => r#"hello\ world"#.into(),
             )
         );
-        query.parse(r#"hello \%field1 world"#);
+        query.parse(r#"hello \@field1 world"#);
         assert_eq!(
             query,
             hashmap!(
-                "primary".into() => "hello %field1 world".into(),
+                "primary".into() => "hello @field1 world".into(),
             )
         );
-        query.parse(r#"%field1 hello\ world"#);
+        query.parse(r#"@field1 hello\ world"#);
         assert_eq!(
             query,
             hashmap!(
                 "field1".into() => r#"hello\ world"#.into(),
             )
         );
-        query.parse(r#"hello %field1 a\"b"#);
+        query.parse(r#"hello @field1 a\"b"#);
         assert_eq!(
             query,
             hashmap!(
@@ -262,7 +262,7 @@ mod test {
                 "field1".into() => r#"a\"b"#.into(),
             )
         );
-        query.parse(r#"%field1 hello\ world"#);
+        query.parse(r#"@field1 hello\ world"#);
         assert_eq!(
             query,
             hashmap!(
@@ -285,7 +285,7 @@ mod test {
         );
 
         // Only the prefix of a field is required.
-        query.parse("hello %anot abc");
+        query.parse("hello @anot abc");
         assert_eq!(
             query,
             hashmap!(
@@ -294,7 +294,7 @@ mod test {
             )
         );
         // The shortest matching the prefix is selected.
-        query.parse("hello %ano abc");
+        query.parse("hello @ano abc");
         assert_eq!(
             query,
             hashmap!(
@@ -303,7 +303,7 @@ mod test {
             )
         );
         // Multiple uses of a column are concatenated with space separators.
-        query.parse("hello %field1 xyz %fie abc");
+        query.parse("hello @field1 xyz @fie abc");
         assert_eq!(
             query,
             hashmap!(
@@ -311,7 +311,7 @@ mod test {
                 "field1".into() => "xyz abc".into()
             )
         );
-        query.parse("hello %fie abc");
+        query.parse("hello @fie abc");
         assert_eq!(
             query,
             hashmap!(
@@ -320,7 +320,7 @@ mod test {
             )
         );
         // The primary column can be explicitly qualified.
-        query.parse("hello %fie abc %prim world");
+        query.parse("hello @fie abc @prim world");
         assert_eq!(
             query,
             hashmap!(
@@ -346,27 +346,27 @@ mod test {
 
         assert_eq!(active_column(&mut query, "|"), Some("primary"));
         assert_eq!(active_column(&mut query, "hello| world"), Some("primary"));
-        assert_eq!(active_column(&mut query, "|%foo hello"), Some("primary"));
-        assert_eq!(active_column(&mut query, "%foo|"), Some("foo"));
-        assert_eq!(active_column(&mut query, "%|"), None);
-        assert_eq!(active_column(&mut query, "%baz|"), None);
-        assert_eq!(active_column(&mut query, "%quiz%|"), None);
-        assert_eq!(active_column(&mut query, "%foo hello| world"), Some("foo"));
-        assert_eq!(active_column(&mut query, "%foo hello world|"), Some("foo"));
-        assert_eq!(active_column(&mut query, "%foo| hello world"), Some("foo"));
-        assert_eq!(active_column(&mut query, "%|foo hello world"), Some("foo"));
-        assert_eq!(active_column(&mut query, "%f|oo hello world"), Some("foo"));
-        assert_eq!(active_column(&mut query, "hello %f|oo world"), Some("foo"));
+        assert_eq!(active_column(&mut query, "|@foo hello"), Some("primary"));
+        assert_eq!(active_column(&mut query, "@foo|"), Some("foo"));
+        assert_eq!(active_column(&mut query, "@|"), None);
+        assert_eq!(active_column(&mut query, "@baz|"), None);
+        assert_eq!(active_column(&mut query, "@quiz@|"), None);
+        assert_eq!(active_column(&mut query, "@foo hello| world"), Some("foo"));
+        assert_eq!(active_column(&mut query, "@foo hello world|"), Some("foo"));
+        assert_eq!(active_column(&mut query, "@foo| hello world"), Some("foo"));
+        assert_eq!(active_column(&mut query, "@|foo hello world"), Some("foo"));
+        assert_eq!(active_column(&mut query, "@f|oo hello world"), Some("foo"));
+        assert_eq!(active_column(&mut query, "hello @f|oo world"), Some("foo"));
         assert_eq!(
-            active_column(&mut query, "hello %f|oo world %bar !"),
+            active_column(&mut query, "hello @f|oo world @bar !"),
             Some("foo")
         );
         assert_eq!(
-            active_column(&mut query, "hello %foo wo|rld %bar !"),
+            active_column(&mut query, "hello @foo wo|rld @bar !"),
             Some("foo")
         );
         assert_eq!(
-            active_column(&mut query, "hello %foo world %bar !|"),
+            active_column(&mut query, "hello @foo world @bar !|"),
             Some("bar")
         );
     }
