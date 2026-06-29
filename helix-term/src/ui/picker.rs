@@ -801,17 +801,33 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             snapshot.item_count(),
         );
 
+        // Persistent indicator shown while the `Ctrl-y` "show ignored files"
+        // toggle is active, so it's clear the results include normally-ignored
+        // files. Rendered just left of the match count.
+        let ignored_indicator = if self.show_ignored { "[ignored] " } else { "" };
+        let right_width = ignored_indicator.len() + count.len();
+
         let area = inner.clip_left(1).with_height(1);
-        let line_area = area.clip_right(count.len() as u16 + 1);
+        let line_area = area.clip_right(right_width as u16 + 1);
 
         // render the prompt first since it will clear its background
         self.prompt.render(line_area, surface, cx);
 
+        let right_x = (area.x + area.width).saturating_sub(right_width as u16 + 1);
+        if !ignored_indicator.is_empty() {
+            surface.set_stringn(
+                right_x,
+                area.y,
+                ignored_indicator,
+                ignored_indicator.len().min(area.width as usize),
+                cx.editor.theme.get("warning"),
+            );
+        }
         surface.set_stringn(
-            (area.x + area.width).saturating_sub(count.len() as u16 + 1),
+            right_x + ignored_indicator.len() as u16,
             area.y,
             &count,
-            (count.len()).min(area.width as usize),
+            count.len().min(area.width as usize),
             text_style,
         );
 
