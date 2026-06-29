@@ -804,7 +804,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
         // Persistent indicator shown while the `Ctrl-y` "show ignored files"
         // toggle is active, so it's clear the results include normally-ignored
         // files. Rendered just left of the match count.
-        let ignored_indicator = if self.show_ignored { "[ignored] " } else { "" };
+        let ignored_indicator = if self.show_ignored { "[all] " } else { "" };
         let right_width = ignored_indicator.len() + count.len();
 
         let area = inner.clip_left(1).with_height(1);
