@@ -221,8 +221,48 @@ pub struct FilePickerData {
 }
 type FilePicker = Picker<PathBuf, FilePickerData>;
 
-pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
+/// Converts a walk entry into a file path, skipping directories and errors.
+fn dir_entry_to_file(entry: Result<ignore::DirEntry, ignore::Error>) -> Option<PathBuf> {
+    let entry = entry.ok()?;
+    if entry.path().is_file() {
+        Some(entry.into_path())
+    } else {
+        None
+    }
+}
+
+/// Builds a sorted file walk rooted at `root`. When `respect_ignores` is false
+/// the ignore/hidden filters are disabled, which is how the file picker's
+/// "show ignored files" toggle (`Ctrl-y`) surfaces otherwise-excluded files.
+fn build_file_walk(
+    root: &Path,
+    config: &helix_view::editor::FilePickerConfig,
+    respect_ignores: bool,
+) -> ignore::Walk {
     use ignore::WalkBuilder;
+
+    let dedup_symlinks = config.deduplicate_links;
+    let absolute_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+
+    let mut walk_builder = WalkBuilder::new(root);
+    walk_builder
+        .hidden(config.hidden && respect_ignores)
+        .parents(config.parents && respect_ignores)
+        .ignore(config.ignore && respect_ignores)
+        .follow_links(config.follow_symlinks)
+        .git_ignore(config.git_ignore && respect_ignores)
+        .git_global(config.git_global && respect_ignores)
+        .git_exclude(config.git_exclude && respect_ignores)
+        .sort_by_file_name(|name1, name2| name1.cmp(name2))
+        .max_depth(config.max_depth)
+        .filter_entry(move |entry| filter_picker_entry(entry, &absolute_root, dedup_symlinks))
+        .add_custom_ignore_filename(helix_loader::config_dir().join("ignore"))
+        .add_custom_ignore_filename(".helix/ignore")
+        .types(get_excluded_types());
+    walk_builder.build()
+}
+
+pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
     use std::time::Instant;
 
     let config = editor.config();
@@ -233,33 +273,8 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
 
     let now = Instant::now();
 
-    let dedup_symlinks = config.file_picker.deduplicate_links;
-    let absolute_root = root.canonicalize().unwrap_or_else(|_| root.clone());
-
-    let mut walk_builder = WalkBuilder::new(&root);
-
-    let mut files = walk_builder
-        .hidden(config.file_picker.hidden)
-        .parents(config.file_picker.parents)
-        .ignore(config.file_picker.ignore)
-        .follow_links(config.file_picker.follow_symlinks)
-        .git_ignore(config.file_picker.git_ignore)
-        .git_global(config.file_picker.git_global)
-        .git_exclude(config.file_picker.git_exclude)
-        .sort_by_file_name(|name1, name2| name1.cmp(name2))
-        .max_depth(config.file_picker.max_depth)
-        .filter_entry(move |entry| filter_picker_entry(entry, &absolute_root, dedup_symlinks))
-        .add_custom_ignore_filename(helix_loader::config_dir().join("ignore"))
-        .add_custom_ignore_filename(".helix/ignore")
-        .types(get_excluded_types())
-        .build()
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            if !entry.path().is_file() {
-                return None;
-            }
-            Some(entry.into_path())
-        });
+    let file_config = config.file_picker.clone();
+    let mut files = build_file_walk(&root, &file_config, true).filter_map(dir_entry_to_file);
     log::debug!("file_picker init {:?}", Instant::now().duration_since(now));
 
     let columns = [PickerColumn::new(
@@ -291,7 +306,28 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
             cx.editor.set_error(err);
         }
     })
-    .with_preview(|_editor, path| Some((path.as_path().into(), None)));
+    .with_preview(|_editor, path| Some((path.as_path().into(), None)))
+    // `Ctrl-y` toggles showing ignored files: re-walk with ignore rules
+    // enabled or disabled, then the normal fuzzy query filters live.
+    .with_ignore_toggle({
+        let root = root.clone();
+        let file_config = file_config.clone();
+        Box::new(
+            move |show_ignored: bool, injector: picker::Injector<PathBuf, FilePickerData>| {
+                let root = root.clone();
+                let file_config = file_config.clone();
+                std::thread::spawn(move || {
+                    let files =
+                        build_file_walk(&root, &file_config, !show_ignored).filter_map(dir_entry_to_file);
+                    for file in files {
+                        if injector.push(file).is_err() {
+                            break;
+                        }
+                    }
+                });
+            },
+        )
+    });
     let injector = picker.injector();
     let timeout = std::time::Instant::now() + std::time::Duration::from_millis(30);
 
@@ -805,6 +841,7 @@ pub mod completers {
 #[cfg(test)]
 mod tests {
     use std::fs::{create_dir, File};
+    use std::io::Write;
 
     use super::*;
 
@@ -823,5 +860,41 @@ mod tests {
         File::create(file).unwrap();
 
         assert_eq!(get_child_if_single_dir(root.path()), None);
+    }
+
+    #[test]
+    fn build_file_walk_respects_ignore_toggle() {
+        // Lay out a tree with an `.ignore`d directory.
+        let root = tempfile::tempdir().unwrap();
+        File::create(root.path().join("visible.txt")).unwrap();
+        let ignored_dir = root.path().join("ignored_dir");
+        create_dir(&ignored_dir).unwrap();
+        File::create(ignored_dir.join("secret.txt")).unwrap();
+        let mut ignore_file = File::create(root.path().join(".ignore")).unwrap();
+        writeln!(ignore_file, "ignored_dir/").unwrap();
+
+        let config = helix_view::editor::FilePickerConfig::default();
+
+        let names = |respect_ignores: bool| -> Vec<String> {
+            build_file_walk(root.path(), &config, respect_ignores)
+                .filter_map(dir_entry_to_file)
+                .map(|p| {
+                    p.strip_prefix(root.path())
+                        .unwrap_or(&p)
+                        .to_string_lossy()
+                        .replace(std::path::MAIN_SEPARATOR, "/")
+                })
+                .collect()
+        };
+
+        // Toggle off (respect ignores): the ignored directory is hidden.
+        let hidden = names(true);
+        assert!(hidden.contains(&"visible.txt".to_string()));
+        assert!(!hidden.iter().any(|n| n.contains("secret.txt")));
+
+        // Toggle on (ignores disabled): the ignored file is surfaced.
+        let shown = names(false);
+        assert!(shown.contains(&"visible.txt".to_string()));
+        assert!(shown.iter().any(|n| n.contains("secret.txt")));
     }
 }

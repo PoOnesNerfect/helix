@@ -2587,13 +2587,18 @@ fn global_search(cx: &mut Context) {
         smart_case: bool,
         file_picker_config: helix_view::editor::FilePickerConfig,
         style: PathStyleConfig,
+        /// Whether the `Ctrl-y` toggle to include ignored files is active. Shared
+        /// with the picker so toggling it changes which files the walk searches.
+        show_ignored: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     let config = cx.editor.config();
+    let show_ignored = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let config = GlobalSearchConfig {
         smart_case: config.search.smart_case,
         file_picker_config: config.file_picker.clone(),
         style: PathStyleConfig::new(&cx.editor.theme),
+        show_ignored: show_ignored.clone(),
     };
 
     let columns = [
@@ -2647,18 +2652,21 @@ fn global_search(cx: &mut Context) {
 
         let injector = injector.clone();
         async move {
+            // When the "show ignored files" toggle (`Ctrl-y`) is on, disable the
+            // ignore/hidden filters so otherwise-excluded files are searched too.
+            let respect = !config.show_ignored.load(std::sync::atomic::Ordering::Relaxed);
             let searcher = SearcherBuilder::new()
                 .binary_detection(BinaryDetection::quit(b'\x00'))
                 .multi_line(true)
                 .build();
             WalkBuilder::new(search_root)
-                .hidden(config.file_picker_config.hidden)
-                .parents(config.file_picker_config.parents)
-                .ignore(config.file_picker_config.ignore)
+                .hidden(config.file_picker_config.hidden && respect)
+                .parents(config.file_picker_config.parents && respect)
+                .ignore(config.file_picker_config.ignore && respect)
                 .follow_links(config.file_picker_config.follow_symlinks)
-                .git_ignore(config.file_picker_config.git_ignore)
-                .git_global(config.file_picker_config.git_global)
-                .git_exclude(config.file_picker_config.git_exclude)
+                .git_ignore(config.file_picker_config.git_ignore && respect)
+                .git_global(config.file_picker_config.git_global && respect)
+                .git_exclude(config.file_picker_config.git_exclude && respect)
                 .max_depth(config.file_picker_config.max_depth)
                 .filter_entry(move |entry| {
                     filter_picker_entry(entry, &absolute_root, dedup_symlinks)
@@ -2786,7 +2794,10 @@ fn global_search(cx: &mut Context) {
          }| { Some((path.as_ref().into(), Some((*line_start, *line_end)))) },
     )
     .with_history_register(Some(reg))
-    .with_dynamic_query(get_files, Some(275));
+    .with_dynamic_query(get_files, Some(275))
+    .with_dynamic_ignore_toggle(Box::new(move |show: bool| {
+        show_ignored.store(show, std::sync::atomic::Ordering::Relaxed)
+    }));
 
     cx.push_layer(Box::new(overlaid(picker)));
 }
