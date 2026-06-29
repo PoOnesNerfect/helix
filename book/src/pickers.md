@@ -8,6 +8,10 @@ Most pickers perform fuzzy matching using [fzf syntax](https://github.com/junegu
 
 If a picker shows multiple columns, you may apply the filter to a specific column by prefixing the column name with `@`. Column names can be shortened to any prefix, so `@p`, `@pa` or `@pat` all mean the same as `@path`. For example, a query of `helix @p .toml !lang` in the global search picker searches for the term "helix" within files with paths ending in ".toml" but not including "lang".
 
+### Showing ignored files
+
+The file picker and global search picker hide files excluded by ignore rules (`.gitignore`, `.ignore`, hidden files, etc.) by default. Press `Ctrl-y` inside either picker to toggle showing those ignored files; press it again to hide them. While ignored files are shown you can keep typing a normal query to narrow the results (for example, type the directory name to focus on it). The toggle re-scans once when pressed, so typing stays responsive.
+
 You can insert the contents of a [register](./registers.md) using `Ctrl-r` followed by a register name. For example, one could insert the currently selected text using `Ctrl-r`-`.`, or the directory of the current file using `Ctrl-r`-`%` followed by `Ctrl-w` to remove the last path section. The global search picker will use the contents of the [search register](./registers.md#default-registers) if you press `Enter` without typing a filter. For example, pressing `*`-`Space-/`-`Enter` will start a global search for the currently selected text.
 
 ### File explorer

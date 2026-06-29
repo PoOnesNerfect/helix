@@ -481,6 +481,7 @@ See the documentation page on [pickers](./pickers.md) for more info.
 | `Ctrl-s`                     | Open horizontally                                          |
 | `Ctrl-v`                     | Open vertically                                            |
 | `Ctrl-t`                     | Toggle preview                                             |
+| `Ctrl-y`                     | Toggle showing ignored files (file picker & global search) |
 | `Escape`, `Ctrl-c`           | Close picker                                               |
 
 ## Prompt

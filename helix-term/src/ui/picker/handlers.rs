@@ -114,6 +114,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> AsyncHook
 
 pub(super) struct DynamicQueryChange {
     pub query: Arc<str>,
+    pub show_ignored: bool,
     pub is_paste: bool,
 }
 
@@ -124,7 +125,8 @@ pub(super) struct DynamicQueryHandler<T: 'static + Send + Sync, D: 'static + Sen
     // this higher if the dynamic query is expensive - for example global search.
     debounce: Duration,
     last_query: Arc<str>,
-    query: Option<Arc<str>>,
+    last_show_ignored: bool,
+    pending: Option<(Arc<str>, bool)>,
 }
 
 impl<T: 'static + Send + Sync, D: 'static + Send + Sync> DynamicQueryHandler<T, D> {
@@ -133,7 +135,8 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> DynamicQueryHandler<T, 
             callback: Arc::new(callback),
             debounce: Duration::from_millis(duration_ms.unwrap_or(100)),
             last_query: "".into(),
-            query: None,
+            last_show_ignored: false,
+            pending: None,
         }
     }
 }
@@ -142,14 +145,18 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> AsyncHook for DynamicQu
     type Event = DynamicQueryChange;
 
     fn handle_event(&mut self, change: Self::Event, _timeout: Option<Instant>) -> Option<Instant> {
-        let DynamicQueryChange { query, is_paste } = change;
-        if query == self.last_query {
+        let DynamicQueryChange {
+            query,
+            show_ignored,
+            is_paste,
+        } = change;
+        if query == self.last_query && show_ignored == self.last_show_ignored {
             // If the search query reverts to the last one we requested, no need to
             // make a new request.
-            self.query = None;
+            self.pending = None;
             None
         } else {
-            self.query = Some(query);
+            self.pending = Some((query, show_ignored));
             if is_paste {
                 self.finish_debounce();
                 None
@@ -160,10 +167,11 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> AsyncHook for DynamicQu
     }
 
     fn finish_debounce(&mut self) {
-        let Some(query) = self.query.take() else {
+        let Some((query, show_ignored)) = self.pending.take() else {
             return;
         };
         self.last_query = query.clone();
+        self.last_show_ignored = show_ignored;
         let callback = self.callback.clone();
 
         job::dispatch_blocking(move |editor, compositor| {

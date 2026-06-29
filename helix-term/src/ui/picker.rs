@@ -238,6 +238,15 @@ impl<T, D> Column<T, D> {
 type DynQueryCallback<T, D> =
     fn(&str, &mut Editor, Arc<D>, &Injector<T, D>) -> BoxFuture<'static, anyhow::Result<()>>;
 
+/// Repopulates a (static) picker when the "show ignored files" toggle changes.
+/// Boxed so it can capture picker-construction state (root, walk config). The
+/// `bool` is the new toggle state (`true` == show ignored files).
+type IgnoreToggleCallback<T, D> = Box<dyn Fn(bool, Injector<T, D>) + Send + Sync>;
+
+/// Propagates the "show ignored files" toggle state into a dynamic picker's
+/// shared config (e.g. global search) before its query is re-run.
+type DynamicIgnoreToggle = Box<dyn Fn(bool) + Send + Sync>;
+
 pub struct Picker<T: 'static + Send + Sync, D: 'static> {
     columns: Arc<[Column<T, D>]>,
     primary_column: usize,
@@ -269,6 +278,17 @@ pub struct Picker<T: 'static + Send + Sync, D: 'static> {
     /// An event handler for syntax highlighting the currently previewed file.
     preview_highlight_handler: Sender<Arc<Path>>,
     dynamic_query_handler: Option<Sender<DynamicQueryChange>>,
+    /// Whether ignored (e.g. git-ignored) files are currently shown. Toggled
+    /// with `Ctrl-y` in pickers that opt in via [`Picker::with_ignore_toggle`]
+    /// or [`Picker::with_dynamic_ignore_toggle`].
+    show_ignored: bool,
+    /// Re-walk callback for static pickers (the file picker) when `show_ignored`
+    /// changes. `None` for pickers that don't support the toggle.
+    ignore_toggle: Option<IgnoreToggleCallback<T, D>>,
+    /// Set for dynamic pickers (global search) that honour `show_ignored`. Called
+    /// on toggle to propagate the new state into the picker's shared config
+    /// before the query is re-run.
+    dynamic_ignore_toggle: Option<DynamicIgnoreToggle>,
 }
 
 impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
@@ -394,6 +414,9 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             file_fn: None,
             preview_highlight_handler: PreviewHighlightHandler::<T, D>::default().spawn(),
             dynamic_query_handler: None,
+            show_ignored: false,
+            ignore_toggle: None,
+            dynamic_ignore_toggle: None,
         }
     }
 
@@ -442,12 +465,71 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
         let handler = DynamicQueryHandler::new(callback, debounce_ms).spawn();
         let event = DynamicQueryChange {
             query: self.primary_query(),
+            show_ignored: self.show_ignored,
             // Treat the initial query as a paste.
             is_paste: true,
         };
         helix_event::send_blocking(&handler, event);
         self.dynamic_query_handler = Some(handler);
         self
+    }
+
+    /// Enables the `Ctrl-y` "show ignored files" toggle for a static picker (the
+    /// file picker). When toggled, the matcher is restarted and `callback` is
+    /// invoked to repopulate the picker with ignore rules enabled/disabled.
+    pub fn with_ignore_toggle(mut self, callback: IgnoreToggleCallback<T, D>) -> Self {
+        self.ignore_toggle = Some(callback);
+        self
+    }
+
+    /// Enables the `Ctrl-y` "show ignored files" toggle for a dynamic picker
+    /// (global search). `set_show_ignored` propagates the toggle state into the
+    /// picker's shared config (read by the [`with_dynamic_query`](Self::with_dynamic_query)
+    /// callback) before the query is re-run.
+    pub fn with_dynamic_ignore_toggle(mut self, set_show_ignored: DynamicIgnoreToggle) -> Self {
+        self.dynamic_ignore_toggle = Some(set_show_ignored);
+        self
+    }
+
+    /// Toggles whether ignored files are shown, repopulating the picker.
+    fn toggle_ignored(&mut self, cx: &mut Context) {
+        // Only act for pickers that opted in, so the toggle is a no-op (rather
+        // than a misleading status) on unrelated pickers.
+        if self.ignore_toggle.is_none() && self.dynamic_ignore_toggle.is_none() {
+            return;
+        }
+        self.show_ignored = !self.show_ignored;
+        self.cursor = 0;
+        let show_ignored = self.show_ignored;
+
+        if self.ignore_toggle.is_some() {
+            // Static picker: clear and re-walk now.
+            self.version.fetch_add(1, atomic::Ordering::Relaxed);
+            self.matcher.restart(false);
+            let injector = self.injector();
+            if let Some(callback) = &self.ignore_toggle {
+                callback(show_ignored, injector);
+            }
+        } else if let Some(set_show_ignored) = &self.dynamic_ignore_toggle {
+            // Dynamic picker: update shared config, then re-fire the query. The
+            // `show_ignored` field of the change makes the handler re-run even
+            // though the query text is unchanged.
+            set_show_ignored(show_ignored);
+            if let Some(handler) = &self.dynamic_query_handler {
+                let event = DynamicQueryChange {
+                    query: self.primary_query(),
+                    show_ignored,
+                    is_paste: true,
+                };
+                helix_event::send_blocking(handler, event);
+            }
+        }
+
+        cx.editor.set_status(if show_ignored {
+            "Showing ignored files"
+        } else {
+            "Hiding ignored files"
+        });
     }
 
     pub fn with_default_action(mut self, action: Action) -> Self {
@@ -574,6 +656,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
         if let Some(handler) = &self.dynamic_query_handler {
             let event = DynamicQueryChange {
                 query: self.primary_query(),
+                show_ignored: self.show_ignored,
                 is_paste,
             };
             helix_event::send_blocking(handler, event);
@@ -1163,6 +1246,9 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
             }
             ctrl!('t') => {
                 self.toggle_preview();
+            }
+            ctrl!('y') => {
+                self.toggle_ignored(ctx);
             }
             _ => {
                 self.prompt_handle_event(event, ctx);
