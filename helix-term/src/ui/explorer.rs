@@ -31,6 +31,7 @@ enum FileType {
 #[derive(PartialEq, Eq, Debug, Clone)]
 struct FileInfo {
     file_type: FileType,
+    is_symlink: bool,
     path: PathBuf,
 }
 
@@ -38,6 +39,7 @@ impl FileInfo {
     fn root(path: PathBuf) -> Self {
         Self {
             file_type: FileType::Root,
+            is_symlink: false,
             path,
         }
     }
@@ -105,6 +107,22 @@ impl TreeViewItem for FileInfo {
         self.get_text().to_string()
     }
 
+    fn display_name(&self) -> String {
+        let name = self.get_text();
+        // Decorate symlinks with their target (`ls -l` style). This is
+        // display-only: `name()` stays the bare file name so reveal, search, and
+        // sorting keep working on the logical path.
+        if self.is_symlink {
+            if let Ok(target) = std::fs::read_link(&self.path) {
+                let target = target.to_string_lossy();
+                #[cfg(test)]
+                let target = target.replace(std::path::MAIN_SEPARATOR, "/");
+                return format!("{name} → {target}");
+            }
+        }
+        name.into_owned()
+    }
+
     fn is_parent(&self) -> bool {
         matches!(self.file_type, FileType::Folder | FileType::Root)
     }
@@ -112,6 +130,7 @@ impl TreeViewItem for FileInfo {
 
 fn dir_entry_to_file_info(entry: DirEntry, path: &Path) -> Option<FileInfo> {
     let full_path = path.join(entry.file_name());
+    let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
     // `DirEntry::metadata` does not traverse symlinks, so a symlink pointing at
     // a directory would be misclassified as a file and could not be expanded.
     // `fs::metadata` follows symlinks to report the target's type; fall back to
@@ -130,6 +149,7 @@ fn dir_entry_to_file_info(entry: DirEntry, path: &Path) -> Option<FileInfo> {
     };
     Some(FileInfo {
         file_type,
+        is_symlink,
         path: full_path,
     })
 }
@@ -881,6 +901,23 @@ mod test_explorer {
 
         // The cycle guard demotes it to a non-expandable file.
         assert_eq!(info.file_type, FileType::File);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlink_is_marked_in_tree() {
+        let path = dummy_file_tree();
+
+        // Relative target keeps the rendered marker deterministic.
+        std::os::unix::fs::symlink("scripts", path.join("scripts_link")).unwrap();
+        let mut explorer = Explorer::from_path(path.clone(), 100).unwrap();
+
+        // The symlink is decorated with its target, while plain entries are not.
+        let rendered = render(&mut explorer);
+        assert!(
+            rendered.contains("scripts_link → scripts"),
+            "expected symlink marker in:\n{rendered}"
+        );
     }
 
     #[cfg(unix)]
