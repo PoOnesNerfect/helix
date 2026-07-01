@@ -17,7 +17,7 @@ use gix::status::{
 };
 use gix::{Commit, ObjectId, Repository, ThreadSafeRepository};
 
-use crate::FileChange;
+use crate::{BlameInformation, FileChange};
 
 #[cfg(test)]
 mod test;
@@ -236,3 +236,66 @@ fn find_file_in_commit(repo: &Repository, commit: &Commit, file: &Path) -> Resul
         EntryKind::Blob | EntryKind::BlobExecutable => Ok(tree_entry.object_id()),
     }
 }
+
+/// Returns blame information for a single line of a file, i.e. metadata about the
+/// commit that last modified `line` (1-based) of `file` in the repository's HEAD
+/// history. Used for the on-demand blame popover.
+pub fn blame_line(file: &Path, line: u32, trust_full: bool) -> Result<BlameInformation> {
+    debug_assert!(!file.exists() || file.is_file());
+    debug_assert!(file.is_absolute());
+    let file = gix::path::realpath(file).context("resolve symlinks")?;
+
+    let repo_dir = get_repo_dir(&file)?;
+    let repo = open_repo(repo_dir, trust_full)
+        .context("failed to open git repo")?
+        .to_thread_local();
+
+    let head = repo.head_commit()?;
+
+    let work_dir = repo.workdir().context("repo has no worktree")?;
+    let rela_path = file.strip_prefix(work_dir)?;
+    let rela_path = gix::path::try_into_bstr(rela_path)?;
+
+    // Blame just the single requested line. `blame_file` walks history for the
+    // file, so this is comparatively expensive and is expected to be run off the
+    // main thread by the caller.
+    let ranges = gix::blame::BlameRanges::from_one_based_inclusive_range(line..=line)
+        .context("invalid blame range")?;
+    let outcome = repo.blame_file(
+        rela_path.as_ref(),
+        head.id,
+        gix::repository::blame_file::Options {
+            ranges,
+            ..Default::default()
+        },
+    )?;
+
+    let entry = outcome
+        .entries
+        .into_iter()
+        .next()
+        .context("no blame information for this line")?;
+
+    let commit = repo.find_commit(entry.commit_id)?;
+    let author = commit.author()?;
+    let message = commit.message()?;
+
+    let author_date = author
+        .time()
+        .ok()
+        .and_then(|time| time.format(gix::date::time::format::SHORT).ok())
+        .unwrap_or_default();
+
+    Ok(BlameInformation {
+        commit_hash: entry.commit_id.to_hex_with_len(8).to_string(),
+        author_name: author.name.to_str_lossy().into_owned(),
+        author_email: author.email.to_str_lossy().into_owned(),
+        author_date,
+        title: message.title.to_str_lossy().trim().to_string(),
+        body: message
+            .body
+            .map(|body| body.to_str_lossy().trim().to_string())
+            .unwrap_or_default(),
+    })
+}
+
