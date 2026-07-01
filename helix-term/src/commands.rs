@@ -3651,7 +3651,20 @@ fn blame_line(cx: &mut Context) {
         let call = move |editor: &mut Editor, compositor: &mut Compositor| {
             let contents = format_blame_popup(&info);
             let markdown = ui::Markdown::new(contents, editor.syn_loader.clone());
-            let popup = Popup::new("blame", markdown).auto_close(true);
+            // Open toward whichever side of the cursor has more room: when the
+            // cursor is in the lower half of the screen, bias the popup upward so
+            // a tall blame message isn't clipped off the bottom (the popup still
+            // flips back if there isn't enough space on the chosen side).
+            let cursor_row = editor.cursor().0.map_or(0, |pos| pos.row);
+            let screen_height = compositor.size().height as usize;
+            let bias = if cursor_row.saturating_mul(2) >= screen_height {
+                Open::Above
+            } else {
+                Open::Below
+            };
+            let popup = Popup::new("blame", markdown)
+                .auto_close(true)
+                .position_bias(bias);
             compositor.replace_or_push("blame", popup);
         };
         Ok(Callback::EditorCompositor(Box::new(call)))
