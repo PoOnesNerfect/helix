@@ -106,17 +106,23 @@ impl DiffProviderRegistry {
         line: u32,
         trust_full: bool,
     ) -> Result<BlameInformation> {
-        self.providers
-            .iter()
-            .find_map(|provider| match provider.blame_line(file, line, trust_full) {
-                Ok(res) => Some(res),
+        // Preserve the first (most relevant) provider error so the caller can
+        // surface a real reason instead of a generic "couldn't blame" message.
+        // The last provider is always `None`, whose error would otherwise mask
+        // the git provider's actual failure.
+        let mut first_err = None;
+        for provider in &self.providers {
+            match provider.blame_line(file, line, trust_full) {
+                Ok(res) => return Ok(res),
                 Err(err) => {
-                    log::debug!("{err:#?}");
-                    log::debug!("failed to blame line {line} of {}", file.display());
-                    None
+                    log::debug!("failed to blame line {line} of {}: {err:#?}", file.display());
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
                 }
-            })
-            .ok_or_else(|| anyhow!("no diff provider could blame {}", file.display()))
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
     }
 }
 
