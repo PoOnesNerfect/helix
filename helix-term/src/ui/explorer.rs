@@ -111,15 +111,23 @@ impl TreeViewItem for FileInfo {
 }
 
 fn dir_entry_to_file_info(entry: DirEntry, path: &Path) -> Option<FileInfo> {
-    entry.metadata().ok().map(|meta| {
-        let file_type = match meta.is_dir() {
-            true => FileType::Folder,
-            false => FileType::File,
-        };
-        FileInfo {
-            file_type,
-            path: path.join(entry.file_name()),
-        }
+    let full_path = path.join(entry.file_name());
+    // `DirEntry::metadata` does not traverse symlinks, so a symlink pointing at
+    // a directory would be misclassified as a file and could not be expanded.
+    // `fs::metadata` follows symlinks to report the target's type; fall back to
+    // the entry's own (non-following) metadata so broken symlinks still show up.
+    let is_dir = std::fs::metadata(&full_path)
+        .or_else(|_| entry.metadata())
+        .ok()?
+        .is_dir();
+    let file_type = if is_dir {
+        FileType::Folder
+    } else {
+        FileType::File
+    };
+    Some(FileInfo {
+        file_type,
+        path: full_path,
     })
 }
 
@@ -803,6 +811,29 @@ mod test_explorer {
     fn new_explorer() -> (PathBuf, Explorer) {
         let path = dummy_file_tree();
         (path.clone(), Explorer::from_path(path, 100).unwrap())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlinked_directory_is_expandable() {
+        use super::{dir_entry_to_file_info, FileType};
+
+        let path = dummy_file_tree();
+
+        // Point a symlink at the existing "scripts" directory.
+        let link = path.join("scripts_link");
+        std::os::unix::fs::symlink(path.join("scripts"), &link).unwrap();
+
+        let info = fs::read_dir(&path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name() == "scripts_link")
+            .and_then(|e| dir_entry_to_file_info(e, &path))
+            .expect("symlinked directory should produce a FileInfo");
+
+        // A symlink to a directory must be treated as a folder so it can be
+        // expanded, not as a plain file.
+        assert_eq!(info.file_type, FileType::Folder);
     }
 
     #[test]
