@@ -154,11 +154,23 @@ impl<T: Component> Popup<T> {
         // if we're on the bottom part, do above
         let can_put_below = viewport.height > rel_y + MIN_HEIGHT;
         let can_put_above = rel_y.checked_sub(MIN_HEIGHT).is_some();
+        // How much vertical room exists on each side of the cursor line.
+        let space_below = viewport.height.saturating_sub(rel_y + 1);
+        let space_above = rel_y;
         let final_pos = match self.position_bias {
-            Open::Below => match can_put_below {
-                true => Open::Below,
-                false => Open::Above,
-            },
+            // Honor the "below" preference only while the cursor is in the upper
+            // part of the screen. Once it passes the vertical midpoint there's
+            // more room above, so open upward instead of cramming (and clipping)
+            // the popup against the bottom edge.
+            Open::Below => {
+                if can_put_below && (space_below >= space_above || !can_put_above) {
+                    Open::Below
+                } else if can_put_above {
+                    Open::Above
+                } else {
+                    Open::Below
+                }
+            }
             Open::Above => match can_put_above {
                 true => Open::Above,
                 false => Open::Below,
