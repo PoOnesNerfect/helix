@@ -3700,11 +3700,27 @@ fn blame_line(cx: &mut Context) {
     let line = base_line + 1;
 
     cx.jobs.callback(async move {
-        let info =
+        let result =
             tokio::task::spawn_blocking(move || provider.blame_line(&path, line, trust_full))
-                .await??;
+                .await?;
 
         let call = move |editor: &mut Editor, compositor: &mut Compositor| {
+            let info = match result {
+                Ok(info) => info,
+                Err(err) => {
+                    // A common failure is an untrusted workspace: under reduced
+                    // trust gix caps allocations and blame can fail on large
+                    // repos. Point the user at the fix instead of the raw error.
+                    if !trust_full {
+                        editor.set_error(
+                            "Cannot blame: this workspace is not trusted. Run :workspace-trust to enable git blame here.",
+                        );
+                    } else {
+                        editor.set_error(format!("Git blame failed: {err}"));
+                    }
+                    return;
+                }
+            };
             let contents = format_blame_popup(&info);
             let markdown = ui::Markdown::new(contents, editor.syn_loader.clone());
             // Open toward whichever side of the cursor has more room: when the
