@@ -517,6 +517,7 @@ impl MappableCommand {
         remove_primary_selection, "Remove primary selection",
         completion, "Invoke completion popup",
         hover, "Show docs for item under cursor",
+        blame_line, "Show git blame for the current line",
         toggle_comments, "Comment/uncomment selections",
         toggle_line_comments, "Line comment/uncomment selections",
         toggle_block_comments, "Block comment/uncomment selections",
@@ -3579,6 +3580,99 @@ fn changed_file_picker(cx: &mut Context) {
             }
         });
     cx.push_layer(Box::new(overlaid(picker)));
+}
+
+/// Maps a document (post-edit) line to the corresponding line in the diff base
+/// (HEAD). Returns `None` when the line lies inside a hunk, i.e. it contains
+/// uncommitted changes and therefore has no committed blame yet.
+fn map_line_to_diff_base(diff: &helix_vcs::Diff, after_line: u32) -> Option<u32> {
+    // A line inside a hunk is a local (uncommitted) change.
+    if diff.hunk_at(after_line, false).is_some() {
+        return None;
+    }
+    // Shift the line by the net size change of every hunk located entirely above
+    // it, converting document coordinates back into diff-base coordinates.
+    let mut base_line = after_line as i64;
+    for i in 0..diff.len() {
+        let hunk = diff.nth_hunk(i);
+        if hunk.after.start >= after_line {
+            break;
+        }
+        base_line += (hunk.before.end - hunk.before.start) as i64;
+        base_line -= (hunk.after.end - hunk.after.start) as i64;
+    }
+    Some(base_line.max(0) as u32)
+}
+
+fn blame_line(cx: &mut Context) {
+    let (view, doc) = current_ref!(cx.editor);
+
+    let Some(path) = doc.path().map(|p| p.to_path_buf()) else {
+        cx.editor.set_error("Cannot blame an unsaved buffer");
+        return;
+    };
+
+    let text = doc.text().slice(..);
+    let cursor_line = doc.selection(view.id).primary().cursor_line(text) as u32;
+
+    // Translate the cursor's line into diff-base (HEAD) coordinates so blame is
+    // accurate even when the buffer has unsaved edits above the cursor. `None`
+    // means the line itself is uncommitted.
+    let base_line = match doc.diff_handle() {
+        Some(diff_handle) => map_line_to_diff_base(&diff_handle.load(), cursor_line),
+        None => Some(cursor_line),
+    };
+    let workspace_root = doc.workspace_root().to_path_buf();
+
+    // All immutable borrows of `doc`/`view` (and thus `cx.editor`) end here.
+    let Some(base_line) = base_line else {
+        cx.editor
+            .set_status("Not committed yet (line has uncommitted changes)");
+        return;
+    };
+
+    let trust_full = cx
+        .editor
+        .workspace_trust
+        .query(
+            &workspace_root,
+            helix_loader::workspace_trust::TrustQuery::Git,
+        )
+        .is_trusted();
+    let provider = cx.editor.diff_providers.clone();
+    // gix blame ranges are 1-based.
+    let line = base_line + 1;
+
+    cx.jobs.callback(async move {
+        let info =
+            tokio::task::spawn_blocking(move || provider.blame_line(&path, line, trust_full))
+                .await??;
+
+        let call = move |editor: &mut Editor, compositor: &mut Compositor| {
+            let contents = format_blame_popup(&info);
+            let markdown = ui::Markdown::new(contents, editor.syn_loader.clone());
+            let popup = Popup::new("blame", markdown).auto_close(true);
+            compositor.replace_or_push("blame", popup);
+        };
+        Ok(Callback::EditorCompositor(Box::new(call)))
+    });
+}
+
+/// Renders blame information as markdown for the blame popup.
+fn format_blame_popup(info: &helix_vcs::BlameInformation) -> String {
+    let mut out = format!("**{}**\n\n", info.title);
+    out.push_str(&format!(
+        "`{}` — {} <{}>",
+        info.commit_hash, info.author_name, info.author_email
+    ));
+    if !info.author_date.is_empty() {
+        out.push_str(&format!(" — {}", info.author_date));
+    }
+    if !info.body.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&info.body);
+    }
+    out
 }
 
 pub fn command_palette(cx: &mut Context) {

@@ -156,3 +156,36 @@ fn symlink_to_git_repo() {
     assert_eq!(git::get_diff_base(&file_link, true).unwrap(), contents);
     assert_eq!(git::get_diff_base(&file, true).unwrap(), contents);
 }
+
+#[test]
+fn blame_line_returns_commit_for_line() {
+    let temp_git = empty_git_repo();
+    let file = temp_git.path().join("file.txt");
+
+    // First commit introduces line 1.
+    File::create(&file)
+        .unwrap()
+        .write_all(b"line one\n")
+        .unwrap();
+    create_commit(temp_git.path(), true);
+
+    // Second commit (different author/message) appends line 2.
+    File::create(&file)
+        .unwrap()
+        .write_all(b"line one\nline two\n")
+        .unwrap();
+    exec_git_cmd("add -A", temp_git.path());
+    exec_git_cmd("commit -m second-change", temp_git.path());
+
+    // Line 2 is blamed to the second commit.
+    let blame = git::blame_line(&file, 2, true).unwrap();
+    assert_eq!(blame.title, "second-change");
+    assert_eq!(blame.author_name, "author");
+    assert_eq!(blame.author_email, "author@example.com");
+    assert_eq!(blame.commit_hash.len(), 8);
+
+    // Line 1 is blamed to the first commit.
+    let blame_first = git::blame_line(&file, 1, true).unwrap();
+    assert_eq!(blame_first.title, "message");
+    assert_ne!(blame_first.commit_hash, blame.commit_hash);
+}

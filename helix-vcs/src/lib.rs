@@ -14,11 +14,27 @@ mod git;
 
 mod diff;
 
-pub use diff::{DiffHandle, Hunk};
+pub use diff::{Diff, DiffHandle, Hunk};
 
 mod status;
 
 pub use status::FileChange;
+
+/// Metadata about the commit that last modified a particular line of a file,
+/// produced by [`DiffProviderRegistry::blame_line`] for the blame popover.
+#[derive(Debug, Clone)]
+pub struct BlameInformation {
+    /// Abbreviated commit hash.
+    pub commit_hash: String,
+    pub author_name: String,
+    pub author_email: String,
+    /// Author date, preformatted for display (empty if unavailable).
+    pub author_date: String,
+    /// First line of the commit message.
+    pub title: String,
+    /// Remainder of the commit message (may be empty).
+    pub body: String,
+}
 
 /// Contains all active diff providers. Diff providers are compiled in via features. Currently
 /// only `git` is supported.
@@ -80,6 +96,28 @@ impl DiffProviderRegistry {
             }
         });
     }
+
+    /// Blame information for a single (1-based) line of `file`: the commit that
+    /// last modified that line. This can be expensive as it walks history, so
+    /// callers should run it off the main thread.
+    pub fn blame_line(
+        &self,
+        file: &Path,
+        line: u32,
+        trust_full: bool,
+    ) -> Result<BlameInformation> {
+        self.providers
+            .iter()
+            .find_map(|provider| match provider.blame_line(file, line, trust_full) {
+                Ok(res) => Some(res),
+                Err(err) => {
+                    log::debug!("{err:#?}");
+                    log::debug!("failed to blame line {line} of {}", file.display());
+                    None
+                }
+            })
+            .ok_or_else(|| anyhow!("no diff provider could blame {}", file.display()))
+    }
 }
 
 impl Default for DiffProviderRegistry {
@@ -136,6 +174,14 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::for_each_changed_file(cwd, trust_full, f),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn blame_line(&self, file: &Path, line: u32, trust_full: bool) -> Result<BlameInformation> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::blame_line(file, line, trust_full),
             Self::None => bail!("No diff support compiled in"),
         }
     }
