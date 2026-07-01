@@ -120,15 +120,36 @@ fn dir_entry_to_file_info(entry: DirEntry, path: &Path) -> Option<FileInfo> {
         .or_else(|_| entry.metadata())
         .ok()?
         .is_dir();
-    let file_type = if is_dir {
+    let file_type = if is_dir && !is_symlink_loop(&entry, &full_path, path) {
         FileType::Folder
     } else {
+        // Symlinked directories that resolve to an ancestor of themselves are
+        // presented as (non-expandable) files so expanding them can't recurse
+        // forever, matching how the `ignore` crate treats such loops.
         FileType::File
     };
     Some(FileInfo {
         file_type,
         path: full_path,
     })
+}
+
+/// Returns `true` when `full_path` is a symlink whose target resolves to an
+/// ancestor of (or is equal to) the directory that contains it. Expanding such
+/// an entry in the tree would loop indefinitely, so callers should treat it as
+/// a leaf.
+fn is_symlink_loop(entry: &DirEntry, full_path: &Path, parent: &Path) -> bool {
+    let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
+    if !is_symlink {
+        return false;
+    }
+    match (full_path.canonicalize(), parent.canonicalize()) {
+        // `full_path.canonicalize()` yields the symlink's real target; if the
+        // containing directory lives underneath that target, following the link
+        // walks back up into an ancestor -> a cycle.
+        (Ok(target), Ok(parent)) => parent.starts_with(&target),
+        _ => false,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -229,25 +250,29 @@ impl Explorer {
     }
 
     pub fn reveal_file(&mut self, path: PathBuf) -> Result<()> {
-        let current_root = &self.state.current_root.canonicalize()?;
-        let current_path = &path.canonicalize()?;
+        // Normalize lexically (resolve `.`/`..`, make absolute) *without*
+        // resolving symlinks. Using the OS `canonicalize` here would resolve a
+        // symlinked parent directory to its real location, push the path outside
+        // `current_root`, and wrongly re-root the tree at the symlink target.
+        // The tree stores items by their logical (symlink-preserving) paths, so
+        // reveal must compare against those same logical paths.
+        let current_root = helix_stdx::path::normalize(&self.state.current_root);
+        let current_path = helix_stdx::path::normalize(&path);
         let segments = {
-            let stripped = match current_path.strip_prefix(current_root) {
+            let stripped = match current_path.strip_prefix(&current_root) {
                 Ok(stripped) => Ok(stripped),
                 Err(_) => {
-                    let parent = path.parent().ok_or_else(|| {
+                    let parent = current_path.parent().ok_or_else(|| {
                         anyhow::anyhow!("Failed get parent of '{}'", current_path.to_string_lossy())
                     })?;
-                    self.change_root(parent.into())?;
-                    current_path
-                        .strip_prefix(parent.canonicalize()?)
-                        .map_err(|_| {
-                            anyhow::anyhow!(
-                                "Failed to strip prefix (parent) '{}' from '{}'",
-                                parent.to_string_lossy(),
-                                current_path.to_string_lossy()
-                            )
-                        })
+                    self.change_root(parent.to_path_buf())?;
+                    current_path.strip_prefix(parent).map_err(|_| {
+                        anyhow::anyhow!(
+                            "Failed to strip prefix (parent) '{}' from '{}'",
+                            parent.to_string_lossy(),
+                            current_path.to_string_lossy()
+                        )
+                    })
                 }
             }?;
 
@@ -834,6 +859,58 @@ mod test_explorer {
         // A symlink to a directory must be treated as a folder so it can be
         // expanded, not as a plain file.
         assert_eq!(info.file_type, FileType::Folder);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlink_loop_is_not_expandable() {
+        use super::{dir_entry_to_file_info, FileType};
+
+        let path = dummy_file_tree();
+
+        // A symlink that points at its own parent directory would expand forever.
+        let link = path.join("loop");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+
+        let info = fs::read_dir(&path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name() == "loop")
+            .and_then(|e| dir_entry_to_file_info(e, &path))
+            .expect("looping symlink should still produce a FileInfo");
+
+        // The cycle guard demotes it to a non-expandable file.
+        assert_eq!(info.file_type, FileType::File);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_reveal_file_inside_symlinked_directory_keeps_root() {
+        let path = dummy_file_tree();
+
+        // "scripts_link" -> "scripts"; opening scripts_link/main.js used to
+        // re-root the tree at the symlink because the file's canonical path
+        // (scripts/main.js) fell outside the project root. The symlink must
+        // exist before the tree is built so the node is present.
+        std::os::unix::fs::symlink(path.join("scripts"), path.join("scripts_link")).unwrap();
+        let mut explorer = Explorer::from_path(path.clone(), 100).unwrap();
+
+        explorer
+            .reveal_file(path.join("scripts_link/main.js"))
+            .unwrap();
+
+        // The root must stay at the project root, not jump to the symlink dir.
+        assert_eq!(explorer.state.current_root, path);
+        assert_eq!(
+            explorer
+                .tree
+                .current_item()
+                .unwrap()
+                .path
+                .file_name()
+                .unwrap(),
+            "main.js"
+        );
     }
 
     #[test]
