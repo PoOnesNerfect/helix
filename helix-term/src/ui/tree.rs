@@ -22,6 +22,13 @@ pub trait TreeViewItem: Sized + Ord {
     fn name(&self) -> String;
     fn is_parent(&self) -> bool;
 
+    /// Text shown for this item when rendering the tree. Defaults to
+    /// [`Self::name`]; override to add display-only decorations (e.g. a symlink
+    /// target) that must not affect logical name matching, search, or sorting.
+    fn display_name(&self) -> String {
+        self.name()
+    }
+
     fn filter(&self, s: &str) -> bool {
         self.name().to_lowercase().contains(&s.to_lowercase())
     }
@@ -797,7 +804,7 @@ fn render_tree<T: TreeViewItem>(
     } else {
         "".to_string()
     };
-    let name = tree.item.name();
+    let name = tree.item.display_name();
     let head = RenderedLine {
         indent,
         selected: selected == tree.index,
